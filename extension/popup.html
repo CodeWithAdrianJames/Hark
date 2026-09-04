@@ -415,13 +415,44 @@
     </div>
   </div>
 
+  <!-- Manual Channel Scanner Button -->
+  <div style="margin-bottom: 12px;">
+    <button id="scanNowBtn" class="btn-primary" style="width: 100%; padding: 10px 14px; font-size: 13px; font-weight: 700; gap: 8px;" type="button">
+      <svg style="width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 2.2;" viewBox="0 0 24 24">
+        <circle cx="11" cy="11" r="8"></circle>
+        <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+      </svg>
+      Force Scan Current Channel
+    </button>
+  </div>
+
+  <!-- Live Run Stats Card -->
+  <div id="scanStatsCard" class="card" style="margin-bottom: 14px; border-color: rgba(99, 102, 241, 0.25); background: rgba(19, 27, 46, 0.85);">
+    <div style="display: flex; align-items: center; justify-content: space-between;">
+      <span style="font-size: 11px; font-weight: 600; color: var(--text-secondary);">Latest Scan Activity</span>
+      <span id="scanCountBadge" class="status-badge" style="background: rgba(99, 102, 241, 0.15); color: #a5b4fc; border: 1px solid rgba(99, 102, 241, 0.3);">
+        0 captured
+      </span>
+    </div>
+    <div id="scanStatusMsg" style="font-size: 11px; color: var(--text-muted); margin-top: 5px;">
+      Ready to scan visible channel assignments.
+    </div>
+  </div>
+
   <!-- Action Buttons -->
   <div class="btn-row">
     <button id="testBtn" class="btn-secondary" type="button">
       Test Connection
     </button>
-    <button id="saveBtn" class="btn-primary" type="button">
+    <button id="saveBtn" class="btn-secondary" type="button">
       Save Settings
+    </button>
+  </div>
+
+  <!-- Cache Reset Button -->
+  <div style="margin-top: 10px;">
+    <button id="resetCacheBtn" class="btn-secondary" style="width: 100%; border-color: rgba(239, 68, 68, 0.25); color: #fca5a5;" type="button">
+      Reset Sync Cache
     </button>
   </div>
 

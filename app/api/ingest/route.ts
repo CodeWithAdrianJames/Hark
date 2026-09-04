@@ -5,18 +5,49 @@ import { getDb } from '@/lib/db';
 
 export const dynamic = 'force-dynamic';
 
+// CORS Headers for browser extensions and cross-origin requests
+const corsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'POST, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+};
+
+/**
+ * Preflight OPTIONS handler
+ */
+export async function OPTIONS() {
+  return new NextResponse(null, {
+    status: 204,
+    headers: corsHeaders,
+  });
+}
+
+/**
+ * Helper to return JSON responses with standard CORS headers
+ */
+function jsonResponse(data: unknown, status = 200) {
+  return NextResponse.json(data, {
+    status,
+    headers: corsHeaders,
+  });
+}
+
 interface IngestMessage {
   id: string;
-  text: string;
-  sender: string;
-  timestamp: string;
-  url: string;
+  text?: string;
+  sender?: string;
+  timestamp?: string;
+  url?: string;
+  isNativeCard?: boolean;
+  title?: string;
+  rawDueString?: string;
 }
 
 interface IngestPayload {
   userId: string;
   channelName: string;
   messages: IngestMessage[];
+  timezone?: string;
 }
 
 interface GeminiExtractionResult {
@@ -29,12 +60,196 @@ interface GeminiExtractionResult {
 
 /**
  * Computes a deterministic SHA-256 hash for duplicate detection.
+ * For native assignment cards, hashes the semantic title + rawDueString so that
+ * re-scans and different DOM container IDs always map to the exact same hash.
  */
 function computeMessageHash(msg: IngestMessage): string {
+  if (msg.isNativeCard) {
+    const cleanTitle = (msg.title || '').trim().toLowerCase();
+    const cleanDue = (msg.rawDueString || '').trim().toLowerCase();
+    return crypto
+      .createHash('sha256')
+      .update(`native_assignment:${cleanTitle}:${cleanDue}`)
+      .digest('hex');
+  }
+
   const identifier = msg.id
     ? `msg_id:${msg.id}`
     : `sender:${msg.sender || ''}:ts:${msg.timestamp || ''}:text:${msg.text || ''}`;
   return crypto.createHash('sha256').update(identifier).digest('hex');
+}
+
+/**
+ * Filters out short conversational noise, emojis, and greetings (< 15 chars or common greetings)
+ */
+function isIgnorableChatMessage(text: string): boolean {
+  if (!text || typeof text !== 'string') return true;
+  const trimmed = text.trim();
+  if (trimmed.length < 15) return true;
+
+  // Filter messages that are only emojis / punctuation / whitespace
+  const withoutSymbols = trimmed.replace(/[\p{Emoji_Presentation}\p{Extended_Pictographic}\s\p{P}]/gu, '');
+  if (withoutSymbols.length < 4) return true;
+
+  // Filter common conversational chatter
+  const noisePatterns = [
+    /^(?:good\s+(?:morning|afternoon|evening|day)|hello|hi|hey)(?:\s+(?:everyone|all|prof|ma'?am|sir|class))?[\s.!]*$/i,
+    /^(?:thank\s+you|thanks|salamat|maraming\s+salamat)(?:\s+(?:prof|ma'?am|sir|all))?[\s.!]*$/i,
+    /^(?:noted|copy|okay|ok|received|acknowledged)(?:\s+(?:po|prof|ma'?am|sir|all))?[\s.!]*$/i,
+    /^(?:yes|no|opo|hindi)(?:\s+(?:po|prof|ma'?am|sir))?[\s.!]*$/i,
+    /^(?:attendance|present|done|here)(?:\s+(?:po|prof|ma'?am|sir))?[\s.!]*$/i,
+  ];
+
+  return noisePatterns.some((pattern) => pattern.test(trimmed));
+}
+
+/**
+ * Fast deterministic date parser that converts common deadline expressions
+ * (e.g., "Due Sep 12", "Due Sep 12 at 11:59 PM", "Due tomorrow at 5:00 PM", "Sep 15")
+ * into a valid UTC ISO 8601 string in the user's timezone without any LLM latency.
+ */
+function parseDeterministicDate(
+  rawDueString: string,
+  userTimezone: string,
+  baseDate: Date = new Date()
+): string | null {
+  if (!rawDueString || typeof rawDueString !== 'string') return null;
+
+  const clean = rawDueString
+    .trim()
+    .replace(/^(?:due\s*(?:by|at|on)?[:\s\-]*|deadline[:\s\-]*)/i, '')
+    .trim();
+
+  // If already standard ISO / YYYY-MM-DD
+  if (/^\d{4}-\d{2}-\d{2}/.test(clean)) {
+    return resolveDueDateToUtcIso(clean, userTimezone, baseDate.toISOString());
+  }
+
+  const refYear = baseDate.getFullYear();
+
+  // Default deadline time components to 23:59:59 in user's timezone
+  let hours = 23;
+  let minutes = 59;
+  let seconds = 59;
+
+  // 1. Check for colon-formatted time: "11:59 PM", "11:59", "23:59"
+  const colonTimeMatch = clean.match(/\b(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(am|pm)?/i);
+  if (colonTimeMatch) {
+    let h = parseInt(colonTimeMatch[1], 10);
+    const m = parseInt(colonTimeMatch[2], 10);
+    const s = colonTimeMatch[3] ? parseInt(colonTimeMatch[3], 10) : 0;
+    const meridian = colonTimeMatch[4]?.toLowerCase();
+    if (meridian === 'pm' && h < 12) h += 12;
+    if (meridian === 'am' && h === 12) h = 0;
+    if (h >= 0 && h <= 23 && m >= 0 && m <= 59) {
+      hours = h;
+      minutes = m;
+      seconds = s;
+    }
+  } else {
+    // 2. Check for simple meridian time: "at 5 PM", "5pm"
+    const simpleTimeMatch = clean.match(/(?:at\s+)?\b(\d{1,2})\s*(am|pm)\b/i);
+    if (simpleTimeMatch) {
+      let h = parseInt(simpleTimeMatch[1], 10);
+      const meridian = simpleTimeMatch[2].toLowerCase();
+      if (meridian === 'pm' && h < 12) h += 12;
+      if (meridian === 'am' && h === 12) h = 0;
+      if (h >= 0 && h <= 23) {
+        hours = h;
+        minutes = 0;
+        seconds = 0;
+      }
+    }
+  }
+
+  // Handle "today"
+  if (/\btoday\b/i.test(clean)) {
+    const target = new Date(baseDate);
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const localIso = `${target.getFullYear()}-${pad(target.getMonth() + 1)}-${pad(target.getDate())}T${pad(hours)}:${pad(minutes)}:${pad(seconds)}`;
+    return resolveDueDateToUtcIso(localIso, userTimezone, baseDate.toISOString());
+  }
+
+  // Handle "tomorrow"
+  if (/\btomorrow\b/i.test(clean)) {
+    const target = new Date(baseDate);
+    target.setDate(target.getDate() + 1);
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const localIso = `${target.getFullYear()}-${pad(target.getMonth() + 1)}-${pad(target.getDate())}T${pad(hours)}:${pad(minutes)}:${pad(seconds)}`;
+    return resolveDueDateToUtcIso(localIso, userTimezone, baseDate.toISOString());
+  }
+
+  // Handle English month names: "Sep 12", "September 12", "12 Sep", "Sep 12, 2026"
+  const months: Record<string, number> = {
+    jan: 1, january: 1,
+    feb: 2, february: 2,
+    mar: 3, march: 3,
+    apr: 4, april: 4,
+    may: 5,
+    jun: 6, june: 6,
+    jul: 7, july: 7,
+    aug: 8, august: 8,
+    sep: 9, sept: 9, september: 9,
+    oct: 10, october: 10,
+    nov: 11, november: 11,
+    dec: 12, december: 12,
+  };
+
+  const monthRegex = /\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b/i;
+  const mMatch = clean.match(monthRegex);
+  if (mMatch) {
+    const monthNum = months[mMatch[1].toLowerCase()];
+    const cleanNoMonth = clean.replace(mMatch[0], ' ');
+    const dayMatch = cleanNoMonth.match(/\b([1-9]|[12]\d|3[01])\b/);
+    if (dayMatch) {
+      const dayNum = parseInt(dayMatch[1], 10);
+      const yearMatch = clean.match(/\b(202\d)\b/);
+      const yearNum = yearMatch ? parseInt(yearMatch[1], 10) : refYear;
+
+      const pad = (n: number) => String(n).padStart(2, '0');
+      const localIso = `${yearNum}-${pad(monthNum)}-${pad(dayNum)}T${pad(hours)}:${pad(minutes)}:${pad(seconds)}`;
+      return resolveDueDateToUtcIso(localIso, userTimezone, baseDate.toISOString());
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Lightweight, zero-temperature single-date conversion prompt
+ * used as an instant fallback when deterministic parser misses an unusual phrasing.
+ */
+async function resolveDateWithLightweightPrompt(
+  ai: GoogleGenAI,
+  rawDueString: string,
+  userTimezone: string,
+  referenceTimestamp: string
+): Promise<string> {
+  const modelName = process.env.GEMINI_MODEL || 'gemini-3.6-flash';
+  const prompt = `Convert the assignment deadline phrase "${rawDueString}" into a strict ISO 8601 string.
+Base Reference Sent Time: "${referenceTimestamp}"
+User Local Timezone: "${userTimezone}" (UTC+8 default)
+If time is omitted, default to 23:59:59 on that date.
+Return strictly JSON in this exact shape: { "due_date_iso": "..." }`;
+
+  try {
+    const res = await ai.models.generateContent({
+      model: modelName,
+      contents: prompt,
+      config: {
+        responseMimeType: 'application/json',
+        temperature: 0,
+      },
+    });
+    const parsed = JSON.parse(res.text?.trim() || '{}');
+    if (parsed.due_date_iso) {
+      return resolveDueDateToUtcIso(parsed.due_date_iso, userTimezone, referenceTimestamp);
+    }
+  } catch (err) {
+    console.warn('Lightweight date conversion prompt error:', err);
+  }
+
+  return resolveDueDateToUtcIso(undefined, userTimezone, referenceTimestamp);
 }
 
 /**
@@ -76,28 +291,105 @@ const geminiResponseSchema = {
   required: ['is_assignment'],
 };
 
+/**
+ * Converts an extracted deadline string into a standardized UTC ISO 8601 string,
+ * guaranteeing the user's local timezone offset is preserved and applied even if
+ * the LLM returns an un-annotated local datetime.
+ */
+function resolveDueDateToUtcIso(
+  rawIso: string | undefined | null,
+  timezone: string,
+  fallbackTimestamp: string
+): string {
+  if (!rawIso || typeof rawIso !== 'string') {
+    const base = fallbackTimestamp ? new Date(fallbackTimestamp) : new Date();
+    const baseTime = isNaN(base.getTime()) ? Date.now() : base.getTime();
+    const fallback = new Date(baseTime + 7 * 24 * 60 * 60 * 1000);
+    fallback.setHours(23, 59, 59, 0);
+    return fallback.toISOString();
+  }
+
+  const trimmed = rawIso.trim();
+
+  // 1. If string explicitly has an offset (+08:00, -05:00, or Z), standard Date parses to exact UTC
+  const hasTimezoneDesignator = /([Zz]|[+-]\d{2}:?\d{2})$/.test(trimmed);
+  if (hasTimezoneDesignator) {
+    const parsed = new Date(trimmed);
+    if (!isNaN(parsed.getTime())) {
+      return parsed.toISOString();
+    }
+  }
+
+  // 2. If no offset was provided, resolve the offset corresponding to the user's timezone
+  try {
+    const sampleDate = new Date();
+    const formatter = new Intl.DateTimeFormat('en-US', {
+      timeZone: timezone,
+      timeZoneName: 'longOffset',
+    });
+    const parts = formatter.formatToParts(sampleDate);
+    const tzPart = parts.find((p) => p.type === 'timeZoneName');
+    const match = tzPart?.value?.match(/GMT([+-]\d{2}:?\d{2})/);
+    const offset = match ? match[1] : '+08:00';
+
+    const withOffset = trimmed.includes('T')
+      ? `${trimmed}${offset}`
+      : `${trimmed}T23:59:59${offset}`;
+
+    const parsedWithOffset = new Date(withOffset);
+    if (!isNaN(parsedWithOffset.getTime())) {
+      return parsedWithOffset.toISOString();
+    }
+  } catch {
+    // Fallthrough on invalid timezone identifier
+  }
+
+  // 3. Fallback direct parse attempt
+  const parsedDirect = new Date(trimmed);
+  if (!isNaN(parsedDirect.getTime())) {
+    return parsedDirect.toISOString();
+  }
+
+  // 4. Default 7-day fallback
+  const base = fallbackTimestamp ? new Date(fallbackTimestamp) : new Date();
+  const baseTime = isNaN(base.getTime()) ? Date.now() : base.getTime();
+  const fallback = new Date(baseTime + 7 * 24 * 60 * 60 * 1000);
+  fallback.setHours(23, 59, 59, 0);
+  return fallback.toISOString();
+}
+
 export async function POST(req: NextRequest) {
   try {
     const body = (await req.json()) as Partial<IngestPayload>;
     const { userId, channelName, messages } = body;
+    const userTimezone = (body.timezone || '').trim() || 'Asia/Manila';
 
     // Validate request payload
     if (!userId || typeof userId !== 'string') {
-      return NextResponse.json(
+      return jsonResponse(
         { error: 'Missing or invalid "userId" field in request payload.' },
-        { status: 400 }
+        400
       );
     }
 
     if (!Array.isArray(messages)) {
-      return NextResponse.json(
+      return jsonResponse(
         { error: 'Missing or invalid "messages" field: must be an array.' },
-        { status: 400 }
+        400
       );
     }
 
     if (messages.length === 0) {
-      return NextResponse.json([], { status: 200 });
+      return jsonResponse(
+        {
+          success: true,
+          inserted: 0,
+          updated: 0,
+          skipped: 0,
+          tasks: [],
+        },
+        200
+      );
     }
 
     const sql = getDb();
@@ -107,7 +399,7 @@ export async function POST(req: NextRequest) {
     const seenHashesInBatch = new Set<string>();
 
     for (const msg of messages) {
-      if (!msg || (!msg.text && !msg.id)) continue;
+      if (!msg || (!msg.text && !msg.id && !msg.title)) continue;
       const hash = computeMessageHash(msg);
       if (!seenHashesInBatch.has(hash)) {
         seenHashesInBatch.add(hash);
@@ -116,7 +408,16 @@ export async function POST(req: NextRequest) {
     }
 
     if (messageEntries.length === 0) {
-      return NextResponse.json([], { status: 200 });
+      return jsonResponse(
+        {
+          success: true,
+          inserted: 0,
+          updated: 0,
+          skipped: 0,
+          tasks: [],
+        },
+        200
+      );
     }
 
     // Query Neon database for existing hashes and raw IDs
@@ -138,24 +439,25 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Filter out messages that already exist in the database
-    const newMessages = messageEntries.filter(
-      (e) => !existingHashSet.has(e.hash) && (!e.msg.id || !existingHashSet.has(e.msg.id))
-    );
+    // Native cards bypass the existingHashSet check so they can be idempotently updated via ON CONFLICT.
+    // Chat messages check existingHashSet so we avoid re-invoking Gemini LLM for already-processed messages.
+    const newMessages = messageEntries.filter((e) => {
+      if (e.msg.isNativeCard) return true;
+      return !existingHashSet.has(e.hash) && (!e.msg.id || !existingHashSet.has(e.msg.id));
+    });
 
     if (newMessages.length === 0) {
-      return NextResponse.json([], { status: 200 });
-    }
-
-    // Initialize Google Gen AI client
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) {
-      return NextResponse.json(
-        { error: 'Server misconfiguration: GEMINI_API_KEY is not set.' },
-        { status: 500 }
+      return jsonResponse(
+        {
+          success: true,
+          inserted: 0,
+          updated: 0,
+          skipped: messageEntries.length,
+          tasks: [],
+        },
+        200
       );
     }
-    const ai = new GoogleGenAI({ apiKey });
 
     // Fetch user's existing courses from Neon
     const existingCourses = await sql`
@@ -171,63 +473,44 @@ export async function POST(req: NextRequest) {
         channel_id: (c.channel_id as string | null) ?? null,
       }));
 
-    // 2 & 3. Process new messages through Gemini 2.5 Flash
-    const parsedAssignments: Array<{
-      hash: string;
-      msg: IngestMessage;
-      extraction: GeminiExtractionResult;
-    }> = [];
+    // Helper to resolve or auto-create course
+    async function resolveCourseId(courseHint: string | null | undefined): Promise<string | null> {
+      const target = (courseHint || channelName || 'COURSE').trim();
+      if (!target) return null;
+      const upper = target.toUpperCase();
 
-    await Promise.all(
-      newMessages.map(async ({ hash, msg }) => {
-        const referenceTimestamp = msg.timestamp || new Date().toISOString();
-        const prompt = `You are an academic assistant analyzing messages from a university course channel.
+      const matched = userCourses.find(
+        (c) =>
+          c.code.toUpperCase() === upper ||
+          (c.channel_id && c.channel_id.toLowerCase() === target.toLowerCase())
+      );
 
-Message Details:
-- Channel: "${channelName || 'General'}"
-- Sender: "${msg.sender || 'Unknown'}"
-- Sent Timestamp (Base Reference Time): "${referenceTimestamp}"
-- Message URL: "${msg.url || 'N/A'}"
+      if (matched) return matched.id;
 
-Message Content:
-"""
-${msg.text}
-"""
-
-Task:
-Analyze whether this message announces or contains an academic assignment, project, homework, lab, problem set, quiz, exam, or deadline.
-- Resolve any relative deadlines (e.g. "tomorrow 11:59pm", "next Tuesday", "in 3 days") relative to the Sent Timestamp ("${referenceTimestamp}"). If no time is specified, default to 23:59:59 on the due date.
-- Extract concise title, description (instructions or submission links), due date in ISO 8601 format, and course code if present or inferrable from the message/channel.
-- Return false for is_assignment if this is casual communication, greetings, or general Q&A without a clear actionable assignment or deadline.`;
-
-        try {
-          const response = await ai.models.generateContent({
-            model: 'gemini-2.5-flash',
-            contents: prompt,
-            config: {
-              responseMimeType: 'application/json',
-              responseSchema: geminiResponseSchema,
-              temperature: 0.1,
-            },
+      try {
+        const code = upper.slice(0, 50);
+        const name = target;
+        const [newCourse] = await sql`
+          INSERT INTO courses (user_id, code, name, channel_id)
+          VALUES (${userId}::uuid, ${code}, ${name}, ${channelName || null})
+          RETURNING id, code, channel_id
+        `;
+        if (newCourse) {
+          const id = newCourse.id as string;
+          userCourses.push({
+            id,
+            code: newCourse.code as string,
+            channel_id: (newCourse.channel_id as string | null) ?? null,
           });
-
-          const rawText = response.text?.trim() || '{}';
-          const extraction = JSON.parse(rawText) as GeminiExtractionResult;
-
-          if (extraction && extraction.is_assignment) {
-            parsedAssignments.push({ hash, msg, extraction });
-          }
-        } catch (err) {
-          console.error(`Failed to process message ID ${msg.id} with Gemini:`, err);
+          return id;
         }
-      })
-    );
-
-    if (parsedAssignments.length === 0) {
-      return NextResponse.json([], { status: 200 });
+      } catch (err) {
+        console.warn('Could not auto-create course:', err);
+      }
+      return null;
     }
 
-    // 4. Map and insert records into Neon 'tasks'
+    // Initialize tasks array for insertion
     const tasksToInsert: Array<{
       user_id: string;
       course_id: string | null;
@@ -240,106 +523,269 @@ Analyze whether this message announces or contains an academic assignment, proje
       status: 'pending';
     }> = [];
 
-    for (const { hash, msg, extraction } of parsedAssignments) {
-      // Resolve course association
-      let courseId: string | null = null;
-      const targetCode = extraction.course_code?.trim().toUpperCase();
-      const safeChannelName = channelName?.trim();
+    // Separate Fast-Path Native Cards from Unstructured Chat Messages
+    const nativeCardEntries: Array<{ hash: string; msg: IngestMessage }> = [];
+    const chatEntries: Array<{ hash: string; msg: IngestMessage }> = [];
 
-      if (targetCode || safeChannelName) {
-        const matched = userCourses.find(
-          (c) =>
-            (targetCode && c.code?.toUpperCase() === targetCode) ||
-            (safeChannelName && c.channel_id === safeChannelName)
+    for (const entry of newMessages) {
+      if (entry.msg.isNativeCard && entry.msg.rawDueString) {
+        nativeCardEntries.push(entry);
+      } else if (!isIgnorableChatMessage(entry.msg.text || '')) {
+        chatEntries.push(entry);
+      }
+    }
+
+    // Initialize Gemini AI only if needed (for fallback dates or chat messages)
+    const apiKey = process.env.GEMINI_API_KEY;
+    const ai = apiKey ? new GoogleGenAI({ apiKey }) : null;
+
+    // ==========================================
+    // 2. Fast-Path Bypass for Native Cards
+    // ==========================================
+    for (const { hash, msg } of nativeCardEntries) {
+      const referenceTimestamp = msg.timestamp || new Date().toISOString();
+      const baseDate = new Date(referenceTimestamp);
+
+      // Fast deterministic parsing first
+      let resolvedDueDate = parseDeterministicDate(
+        msg.rawDueString!,
+        userTimezone,
+        isNaN(baseDate.getTime()) ? new Date() : baseDate
+      );
+
+      // Fallback to lightweight zero-temperature prompt if deterministic parser couldn't parse
+      if (!resolvedDueDate && ai) {
+        resolvedDueDate = await resolveDateWithLightweightPrompt(
+          ai,
+          msg.rawDueString!,
+          userTimezone,
+          referenceTimestamp
         );
-
-        if (matched) {
-          courseId = matched.id;
-        } else {
-          // Optionally create the course if it doesn't exist yet
-          const rawCode = targetCode || safeChannelName || 'COURSE';
-          const code = rawCode.toUpperCase().slice(0, 50);
-          const name = safeChannelName || code;
-
-          const [newCourse] = await sql`
-            INSERT INTO courses (user_id, code, name, channel_id)
-            VALUES (${userId}::uuid, ${code}, ${name}, ${safeChannelName || null})
-            RETURNING id, code, channel_id
-          `;
-
-          if (newCourse) {
-            courseId = newCourse.id as string;
-            userCourses.push({
-              id: newCourse.id as string,
-              code: newCourse.code as string,
-              channel_id: (newCourse.channel_id as string | null) ?? null,
-            });
-          }
-        }
       }
 
-      // Resolve valid due_date
-      let dueDate = extraction.due_date_iso ? new Date(extraction.due_date_iso) : null;
-      if (!dueDate || isNaN(dueDate.getTime())) {
-        const base = msg.timestamp ? new Date(msg.timestamp) : new Date();
-        const baseTime = isNaN(base.getTime()) ? Date.now() : base.getTime();
-        dueDate = new Date(baseTime + 7 * 24 * 60 * 60 * 1000);
-        dueDate.setHours(23, 59, 59, 0);
+      if (!resolvedDueDate) {
+        resolvedDueDate = resolveDueDateToUtcIso(undefined, userTimezone, referenceTimestamp);
       }
+
+      const courseId = await resolveCourseId(channelName);
 
       tasksToInsert.push({
         user_id: userId,
         course_id: courseId,
-        title: extraction.title?.trim() || 'Untitled Assignment',
-        description: extraction.description?.trim() || null,
-        due_date: dueDate.toISOString(),
-        source_type: 'chat_announcement',
+        title: msg.title?.trim() || 'Untitled Assignment',
+        description: `Official assignment from ${channelName || 'MS Teams'}. Due: ${msg.rawDueString}`,
+        due_date: resolvedDueDate,
+        source_type: 'official_assignment',
         source_url: msg.url || null,
         raw_message_hash: hash,
         status: 'pending',
       });
     }
 
-    if (tasksToInsert.length === 0) {
-      return NextResponse.json([], { status: 200 });
+    // ==========================================
+    // 3. Concurrent Batching for Chat Announcements
+    // ==========================================
+    if (chatEntries.length > 0 && ai) {
+      const BATCH_SIZE = 5;
+      const parsedAssignments: Array<{
+        hash: string;
+        msg: IngestMessage;
+        extraction: GeminiExtractionResult;
+      }> = [];
+
+      for (let i = 0; i < chatEntries.length; i += BATCH_SIZE) {
+        const batch = chatEntries.slice(i, i + BATCH_SIZE);
+
+        const settledBatch = await Promise.allSettled(
+          batch.map(async ({ hash, msg }) => {
+            const referenceTimestamp = msg.timestamp || new Date().toISOString();
+            const prompt = `You are an academic assistant analyzing messages from a university course channel.
+
+Message Details:
+- Channel: "${channelName || 'General'}"
+- Sender: "${msg.sender || 'Unknown'}"
+- Sent Timestamp (Base Reference Time): "${referenceTimestamp}"
+- User's Local Timezone: "${userTimezone}" (default UTC+8)
+- Message URL: "${msg.url || 'N/A'}"
+
+Message Content:
+"""
+${msg.text}
+"""
+
+Task:
+Analyze whether this message announces or contains an academic assignment, project, homework, lab, problem set, quiz, exam, or deadline.
+
+Critical Timezone & Deadline Instructions:
+1. Interpret all relative date and time phrases (e.g. "tonight at 11:59 PM", "due tomorrow 5 PM", "this Sunday at 11:59 PM", "next Tuesday", "in 3 days") strictly within the context of the user's specified local timezone ("${userTimezone}").
+2. The message was sent at "${referenceTimestamp}". Resolve all relative dates using this timestamp mapped to the user's timezone.
+3. Always return 'due_date_iso' as a fully qualified ISO 8601 string including the correct timezone offset (e.g. "2026-09-06T23:59:00+08:00") or converted cleanly to UTC with an exact Z suffix matching that exact local moment.
+4. If only a date is mentioned without a specific time, assume 23:59:59 on that date in the user's local timezone ("${userTimezone}").
+5. Extract concise title, description (instructions or submission links), and course code.
+6. Return false for is_assignment if this is casual communication, greetings, or general Q&A without a clear actionable assignment or deadline.`;
+
+            const modelName = process.env.GEMINI_MODEL || 'gemini-3.6-flash';
+            let response;
+            try {
+              response = await ai.models.generateContent({
+                model: modelName,
+                contents: prompt,
+                config: {
+                  responseMimeType: 'application/json',
+                  responseSchema: geminiResponseSchema,
+                  temperature: 0.1,
+                },
+              });
+            } catch (modelError: any) {
+              console.warn(`Model (${modelName}) error: ${modelError.message || modelError}. Retrying once...`);
+              await new Promise((resolve) => setTimeout(resolve, 800));
+              response = await ai.models.generateContent({
+                model: modelName,
+                contents: prompt,
+                config: {
+                  responseMimeType: 'application/json',
+                  responseSchema: geminiResponseSchema,
+                  temperature: 0.1,
+                },
+              });
+            }
+
+            const rawText = response.text?.trim() || '{}';
+            const extraction = JSON.parse(rawText) as GeminiExtractionResult;
+
+            if (extraction && extraction.is_assignment) {
+              return { hash, msg, extraction };
+            }
+            return null;
+          })
+        );
+
+        for (const res of settledBatch) {
+          if (res.status === 'fulfilled' && res.value) {
+            parsedAssignments.push(res.value);
+          } else if (res.status === 'rejected') {
+            console.error('Chat batch analysis rejected item:', res.reason);
+          }
+        }
+      }
+
+      // Convert parsed chat assignments into tasksToInsert
+      for (const { hash, msg, extraction } of parsedAssignments) {
+        const courseId = await resolveCourseId(extraction.course_code);
+        const resolvedDueDateUtc = resolveDueDateToUtcIso(
+          extraction.due_date_iso,
+          userTimezone,
+          msg.timestamp || new Date().toISOString()
+        );
+
+        tasksToInsert.push({
+          user_id: userId,
+          course_id: courseId,
+          title: extraction.title?.trim() || 'Untitled Assignment',
+          description: extraction.description?.trim() || null,
+          due_date: resolvedDueDateUtc,
+          source_type: 'chat_announcement',
+          source_url: msg.url || null,
+          raw_message_hash: hash,
+          status: 'pending',
+        });
+      }
     }
 
-    // Batch insert tasks into Neon database
-    const createdTasks = await Promise.all(
-      tasksToInsert.map(async (task) => {
-        const [insertedRow] = await sql`
-          INSERT INTO tasks (
-            user_id,
-            course_id,
-            title,
-            description,
-            due_date,
-            source_type,
-            source_url,
-            raw_message_hash,
-            status
-          ) VALUES (
-            ${task.user_id}::uuid,
-            ${task.course_id}::uuid,
-            ${task.title},
-            ${task.description},
-            ${task.due_date}::timestamptz,
-            ${task.source_type},
-            ${task.source_url},
-            ${task.raw_message_hash},
-            ${task.status}
-          )
-          RETURNING *
-        `;
-        return insertedRow;
+    // Deduplicate tasksToInsert by raw_message_hash so batch items never conflict with each other
+    const uniqueTasksMap = new Map<string, (typeof tasksToInsert)[0]>();
+    for (const task of tasksToInsert) {
+      if (!uniqueTasksMap.has(task.raw_message_hash)) {
+        uniqueTasksMap.set(task.raw_message_hash, task);
+      }
+    }
+    const finalTasksToInsert = Array.from(uniqueTasksMap.values());
+
+    if (finalTasksToInsert.length === 0) {
+      return jsonResponse(
+        {
+          success: true,
+          inserted: 0,
+          updated: 0,
+          skipped: messageEntries.length,
+          tasks: [],
+        },
+        200
+      );
+    }
+
+    // Upsert tasks into Neon database with ON CONFLICT resolution
+    let insertedCount = 0;
+    let updatedCount = 0;
+    let skippedCount = 0;
+    const allReturnedTasks: Array<Record<string, unknown>> = [];
+
+    await Promise.all(
+      finalTasksToInsert.map(async (task) => {
+        try {
+          const [row] = await sql`
+            INSERT INTO tasks (
+              user_id,
+              course_id,
+              title,
+              description,
+              due_date,
+              source_type,
+              source_url,
+              raw_message_hash,
+              status
+            ) VALUES (
+              ${task.user_id}::uuid,
+              ${task.course_id ? task.course_id : null},
+              ${task.title},
+              ${task.description},
+              ${task.due_date}::timestamptz,
+              ${task.source_type},
+              ${task.source_url},
+              ${task.raw_message_hash},
+              ${task.status}
+            )
+            ON CONFLICT (raw_message_hash) 
+            DO UPDATE SET 
+              title = EXCLUDED.title,
+              due_date = EXCLUDED.due_date,
+              description = COALESCE(EXCLUDED.description, tasks.description),
+              source_url = COALESCE(EXCLUDED.source_url, tasks.source_url),
+              updated_at = NOW()
+            RETURNING *, (xmax = 0) AS is_inserted
+          `;
+
+          if (row) {
+            allReturnedTasks.push(row);
+            if (row.is_inserted) {
+              insertedCount++;
+            } else {
+              updatedCount++;
+            }
+          } else {
+            skippedCount++;
+          }
+        } catch (itemError) {
+          console.error(`Error upserting task for hash ${task.raw_message_hash}:`, itemError);
+          skippedCount++;
+        }
       })
     );
 
-    // Return 200 with an array of newly created tasks
-    return NextResponse.json(createdTasks || [], { status: 200 });
+    // Return 200 with metrics and array of newly created/updated tasks
+    return jsonResponse(
+      {
+        success: true,
+        inserted: insertedCount,
+        updated: updatedCount,
+        skipped: skippedCount,
+        tasks: allReturnedTasks,
+      },
+      200
+    );
   } catch (error: unknown) {
     console.error('Unhandled error in /api/ingest:', error);
     const message = error instanceof Error ? error.message : 'Internal server error';
-    return NextResponse.json({ error: message }, { status: 500 });
+    return jsonResponse({ error: message }, 500);
   }
 }
