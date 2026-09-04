@@ -1,0 +1,29 @@
+{
+  "manifest_version": 3,
+  "name": "Hark for MS Teams",
+  "version": "1.0.0",
+  "description": "Companion Chrome Extension for Hark academic assignment tracking and message ingestion from Microsoft Teams.",
+  "permissions": [
+    "storage"
+  ],
+  "host_permissions": [
+    "https://teams.microsoft.com/*",
+    "http://localhost:3000/*",
+    "https://*/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Hark for MS Teams Settings"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://teams.microsoft.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}
