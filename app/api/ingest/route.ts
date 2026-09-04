@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import crypto from 'crypto';
 import { GoogleGenAI, Type } from '@google/genai';
-import { getAdminSupabaseClient } from '@/lib/supabase';
+import { getDb } from '@/lib/db';
 
 export const dynamic = 'force-dynamic';
 
@@ -100,7 +100,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json([], { status: 200 });
     }
 
-    const supabase = getAdminSupabaseClient();
+    const sql = getDb();
 
     // 1. Deduplicate incoming messages locally & compute hashes
     const messageEntries: Array<{ hash: string; msg: IngestMessage }> = [];
@@ -119,27 +119,24 @@ export async function POST(req: NextRequest) {
       return NextResponse.json([], { status: 200 });
     }
 
-    // Query database for existing hashes and raw IDs
+    // Query Neon database for existing hashes and raw IDs
     const queryHashes = messageEntries.map((e) => e.hash);
     const queryIds = messageEntries.map((e) => e.msg.id).filter(Boolean);
     const allLookupKeys = Array.from(new Set([...queryHashes, ...queryIds]));
 
-    const { data: existingTasks, error: checkError } = await supabase
-      .from('tasks')
-      .select('raw_message_hash')
-      .in('raw_message_hash', allLookupKeys);
-
-    if (checkError) {
-      console.error('Error querying existing tasks for duplicates:', checkError);
-      return NextResponse.json(
-        { error: 'Failed to verify duplicate messages against database.', details: checkError.message },
-        { status: 500 }
+    let existingHashSet = new Set<string>();
+    if (allLookupKeys.length > 0) {
+      const existingRows = await sql`
+        SELECT raw_message_hash
+        FROM tasks
+        WHERE raw_message_hash = ANY(${allLookupKeys}::text[])
+      `;
+      existingHashSet = new Set(
+        existingRows
+          .map((row: Record<string, unknown>) => row.raw_message_hash as string)
+          .filter(Boolean)
       );
     }
-
-    const existingHashSet = new Set(
-      (existingTasks || []).map((t) => t.raw_message_hash).filter(Boolean)
-    );
 
     // Filter out messages that already exist in the database
     const newMessages = messageEntries.filter(
@@ -160,13 +157,19 @@ export async function POST(req: NextRequest) {
     }
     const ai = new GoogleGenAI({ apiKey });
 
-    // Fetch user's existing courses for potential association
-    const { data: existingCourses } = await supabase
-      .from('courses')
-      .select('id, code, channel_id')
-      .eq('user_id', userId);
+    // Fetch user's existing courses from Neon
+    const existingCourses = await sql`
+      SELECT id, code, channel_id
+      FROM courses
+      WHERE user_id = ${userId}::uuid
+    `;
 
-    const userCourses = existingCourses || [];
+    const userCourses: Array<{ id: string; code: string; channel_id: string | null }> =
+      existingCourses.map((c: Record<string, unknown>) => ({
+        id: c.id as string,
+        code: c.code as string,
+        channel_id: (c.channel_id as string | null) ?? null,
+      }));
 
     // 2 & 3. Process new messages through Gemini 2.5 Flash
     const parsedAssignments: Array<{
@@ -224,7 +227,7 @@ Analyze whether this message announces or contains an academic assignment, proje
       return NextResponse.json([], { status: 200 });
     }
 
-    // 4. Map and insert records into Supabase 'tasks'
+    // 4. Map and insert records into Neon 'tasks'
     const tasksToInsert: Array<{
       user_id: string;
       course_id: string | null;
@@ -257,20 +260,20 @@ Analyze whether this message announces or contains an academic assignment, proje
           const rawCode = targetCode || safeChannelName || 'COURSE';
           const code = rawCode.toUpperCase().slice(0, 50);
           const name = safeChannelName || code;
-          const { data: newCourse } = await supabase
-            .from('courses')
-            .insert({
-              user_id: userId,
-              code,
-              name,
-              channel_id: safeChannelName || null,
-            })
-            .select('id, code, channel_id')
-            .single();
+
+          const [newCourse] = await sql`
+            INSERT INTO courses (user_id, code, name, channel_id)
+            VALUES (${userId}::uuid, ${code}, ${name}, ${safeChannelName || null})
+            RETURNING id, code, channel_id
+          `;
 
           if (newCourse) {
-            courseId = newCourse.id;
-            userCourses.push(newCourse);
+            courseId = newCourse.id as string;
+            userCourses.push({
+              id: newCourse.id as string,
+              code: newCourse.code as string,
+              channel_id: (newCourse.channel_id as string | null) ?? null,
+            });
           }
         }
       }
@@ -280,7 +283,6 @@ Analyze whether this message announces or contains an academic assignment, proje
       if (!dueDate || isNaN(dueDate.getTime())) {
         const base = msg.timestamp ? new Date(msg.timestamp) : new Date();
         const baseTime = isNaN(base.getTime()) ? Date.now() : base.getTime();
-        // Fallback: 7 days after message sent date at 23:59:59
         dueDate = new Date(baseTime + 7 * 24 * 60 * 60 * 1000);
         dueDate.setHours(23, 59, 59, 0);
       }
@@ -302,18 +304,36 @@ Analyze whether this message announces or contains an academic assignment, proje
       return NextResponse.json([], { status: 200 });
     }
 
-    const { data: createdTasks, error: insertError } = await supabase
-      .from('tasks')
-      .insert(tasksToInsert)
-      .select();
-
-    if (insertError) {
-      console.error('Error inserting tasks into Supabase:', insertError);
-      return NextResponse.json(
-        { error: 'Failed to insert parsed tasks into database.', details: insertError.message },
-        { status: 500 }
-      );
-    }
+    // Batch insert tasks into Neon database
+    const createdTasks = await Promise.all(
+      tasksToInsert.map(async (task) => {
+        const [insertedRow] = await sql`
+          INSERT INTO tasks (
+            user_id,
+            course_id,
+            title,
+            description,
+            due_date,
+            source_type,
+            source_url,
+            raw_message_hash,
+            status
+          ) VALUES (
+            ${task.user_id}::uuid,
+            ${task.course_id}::uuid,
+            ${task.title},
+            ${task.description},
+            ${task.due_date}::timestamptz,
+            ${task.source_type},
+            ${task.source_url},
+            ${task.raw_message_hash},
+            ${task.status}
+          )
+          RETURNING *
+        `;
+        return insertedRow;
+      })
+    );
 
     // Return 200 with an array of newly created tasks
     return NextResponse.json(createdTasks || [], { status: 200 });
