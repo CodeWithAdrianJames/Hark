@@ -358,6 +358,69 @@ function resolveDueDateToUtcIso(
   return fallback.toISOString();
 }
 
+/**
+ * Checks whether a URL is a specific Teams channel, thread, message, or assignment deep link,
+ * rather than a generic top-level Teams root.
+ */
+function isSpecificDeepLink(url: string | null | undefined): boolean {
+  if (!url || typeof url !== 'string') return false;
+  const trimmed = url.trim();
+  if (!trimmed || trimmed === '#' || trimmed.startsWith('javascript:')) return false;
+
+  const lower = trimmed.toLowerCase();
+  const genericRoots = [
+    'https://teams.microsoft.com',
+    'https://teams.microsoft.com/',
+    'https://teams.microsoft.com/v2',
+    'https://teams.microsoft.com/v2/',
+    'https://teams.microsoft.com/_',
+    'https://teams.microsoft.com/_/',
+    'https://teams.live.com',
+    'https://teams.live.com/',
+  ];
+
+  if (genericRoots.includes(lower)) return false;
+
+  try {
+    const parsed = new URL(trimmed);
+    const path = parsed.pathname.toLowerCase();
+    const search = parsed.search.toLowerCase();
+    const hash = parsed.hash.toLowerCase();
+
+    const hasSpecificPath =
+      path.includes('/l/message/') ||
+      path.includes('/l/channel/') ||
+      path.includes('/l/entity/') ||
+      path.includes('/l/assignment/') ||
+      path.includes('/conversations/') ||
+      path.includes('/messages/');
+
+    const hasSpecificParams =
+      search.includes('groupid=') ||
+      search.includes('threadid=') ||
+      search.includes('channelid=') ||
+      search.includes('parentmessageid=') ||
+      search.includes('assignmentid=') ||
+      hash.includes('groupid=') ||
+      hash.includes('threadid=') ||
+      hash.includes('conversations/');
+
+    return hasSpecificPath || hasSpecificParams;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Normalizes source_url: returns clean URL string or null if empty/invalid.
+ */
+function normalizeSourceUrl(url: string | null | undefined): string | null {
+  if (!url || typeof url !== 'string') return null;
+  const trimmed = url.trim();
+  if (!trimmed || trimmed === '#' || trimmed.startsWith('javascript:')) return null;
+  return trimmed;
+}
+
 export async function POST(req: NextRequest) {
   try {
     const body = (await req.json()) as Partial<IngestPayload>;
@@ -576,7 +639,7 @@ export async function POST(req: NextRequest) {
         description: `Official assignment from ${channelName || 'MS Teams'}. Due: ${msg.rawDueString}`,
         due_date: resolvedDueDate,
         source_type: 'official_assignment',
-        source_url: msg.url || null,
+        source_url: msg.url ? String(msg.url).trim() : null,
         raw_message_hash: hash,
         status: 'pending',
       });
@@ -685,7 +748,7 @@ Critical Timezone & Deadline Instructions:
           description: extraction.description?.trim() || null,
           due_date: resolvedDueDateUtc,
           source_type: 'chat_announcement',
-          source_url: msg.url || null,
+          source_url: msg.url ? String(msg.url).trim() : null,
           raw_message_hash: hash,
           status: 'pending',
         });
@@ -750,7 +813,22 @@ Critical Timezone & Deadline Instructions:
               title = EXCLUDED.title,
               due_date = EXCLUDED.due_date,
               description = COALESCE(EXCLUDED.description, tasks.description),
-              source_url = COALESCE(EXCLUDED.source_url, tasks.source_url),
+              source_url = CASE
+                -- 1. If incoming source_url is a specific deep link, always update to it (overriding previous broken/generic URLs):
+                WHEN EXCLUDED.source_url IS NOT NULL 
+                     AND EXCLUDED.source_url NOT IN ('https://teams.microsoft.com', 'https://teams.microsoft.com/', 'https://teams.microsoft.com/v2', 'https://teams.microsoft.com/v2/', 'https://teams.microsoft.com/_', 'https://teams.microsoft.com/_/')
+                     AND EXCLUDED.source_url ~* '(/l/|/conversations/|groupId=|threadId=|channelId=|assignment|parentMessageId=)'
+                THEN EXCLUDED.source_url
+
+                -- 2. If existing tasks.source_url is already a specific deep link, do NOT overwrite with bare generic fallback:
+                WHEN tasks.source_url IS NOT NULL 
+                     AND tasks.source_url NOT IN ('https://teams.microsoft.com', 'https://teams.microsoft.com/', 'https://teams.microsoft.com/v2', 'https://teams.microsoft.com/v2/', 'https://teams.microsoft.com/_', 'https://teams.microsoft.com/_/')
+                     AND tasks.source_url ~* '(/l/|/conversations/|groupId=|threadId=|channelId=|assignment|parentMessageId=)'
+                THEN tasks.source_url
+
+                -- 3. Fallback to whatever non-null URL is available
+                ELSE COALESCE(EXCLUDED.source_url, tasks.source_url)
+              END,
               updated_at = NOW()
             RETURNING *, (xmax = 0) AS is_inserted
           `;

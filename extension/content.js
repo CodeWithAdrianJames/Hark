@@ -138,6 +138,238 @@
   }
 
   /**
+   * Resolves the canonical deep link and routing context of the active channel directly from the Teams DOM.
+   * Does NOT rely on raw window.location.href because Teams v2 is an SPA.
+   */
+  function getActiveTeamsChannelContext() {
+    let resolvedChannelUrl = null;
+    let detectedGroupId = null;
+    let detectedTenantId = null;
+    let detectedChannelId = null;
+    const detectedChannelName = getChannelName();
+
+    // 1. Locate the currently active/selected channel item in the left rail sidebar
+    const activeSelectors = [
+      '[role="treeitem"][aria-selected="true"]',
+      '[role="treeitem"][aria-current="true"]',
+      '[role="treeitem"][aria-current="page"]',
+      '[data-tid*="active-channel"]',
+      '[data-tid*="selected-channel"]',
+      '[data-tid*="channel-list-item"][aria-selected="true"]',
+      '[data-tid="team-channel-item"][aria-selected="true"]',
+      'a[aria-current="true"][href*="/l/channel/"]',
+      'a[aria-selected="true"][href*="/l/channel/"]',
+      '.ui-tree__item[aria-selected="true"]',
+      '[role="listitem"][aria-selected="true"]',
+      'li[aria-selected="true"]',
+      'div[aria-selected="true"][data-tid*="channel"]',
+    ];
+
+    let activeNode = null;
+    for (const sel of activeSelectors) {
+      const el = document.querySelector(sel);
+      if (el) {
+        activeNode = el;
+        break;
+      }
+    }
+
+    // 2. Read anchor href from that active channel node
+    // Teams channel sidebar items render an anchor tag containing the exact canonical URL:
+    // https://teams.microsoft.com/l/channel/<channelId>/<channelName>?groupId=<groupId>&tenantId=<tenantId>
+    if (activeNode) {
+      const anchor =
+        activeNode.tagName === 'A' && activeNode.getAttribute('href')
+          ? activeNode
+          : activeNode.querySelector('a[href]');
+
+      if (anchor) {
+        const href = (anchor.getAttribute('href') || '').trim();
+        if (href && !href.startsWith('#') && !href.startsWith('javascript:')) {
+          resolvedChannelUrl = href.startsWith('http') ? href : new URL(href, window.location.origin).href;
+        }
+      }
+
+      // Check data-href or data-url attributes
+      if (!resolvedChannelUrl) {
+        const dataHref = activeNode.getAttribute('data-href') || activeNode.getAttribute('data-url');
+        if (dataHref && dataHref.startsWith('http')) {
+          resolvedChannelUrl = dataHref;
+        }
+      }
+
+      // Extract data attributes (data-channel-id, data-team-id, data-group-id)
+      detectedChannelId =
+        activeNode.getAttribute('data-channel-id') ||
+        activeNode.getAttribute('data-tid')?.match(/19:[a-zA-Z0-9_\-]+(?:%40|@)thread\.[a-zA-Z0-9_\-]+/i)?.[0] ||
+        null;
+
+      const teamParent = activeNode.closest('[data-team-id], [data-group-id], [data-tid*="team"]');
+      detectedGroupId =
+        teamParent?.getAttribute('data-group-id') ||
+        teamParent?.getAttribute('data-team-id') ||
+        null;
+    }
+
+    // 3. Fallback: Search channel header or breadcrumbs for canonical channel link
+    if (!resolvedChannelUrl || !resolvedChannelUrl.includes('/l/channel/')) {
+      const headerAnchor = document.querySelector(
+        '[data-tid*="channel-header"] a[href*="/l/channel/"], [data-tid*="thread-header"] a[href*="/l/channel/"], a[href*="/l/channel/"]'
+      );
+      if (headerAnchor) {
+        const href = (headerAnchor.getAttribute('href') || '').trim();
+        if (href && !href.startsWith('#')) {
+          resolvedChannelUrl = href.startsWith('http') ? href : new URL(href, window.location.origin).href;
+        }
+      }
+    }
+
+    // 4. Parse parameters from resolvedChannelUrl if present
+    if (resolvedChannelUrl) {
+      try {
+        const parsed = new URL(resolvedChannelUrl);
+        detectedGroupId = parsed.searchParams.get('groupId') || detectedGroupId;
+        detectedTenantId = parsed.searchParams.get('tenantId') || detectedTenantId;
+        const matchChannel = parsed.pathname.match(/\/l\/channel\/([^/?&#\s]+)/i);
+        if (matchChannel) {
+          detectedChannelId = decodeURIComponent(matchChannel[1]);
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    // 5. Fallback for tenantId / groupId from window.location if still missing
+    if (!detectedTenantId || !detectedGroupId) {
+      try {
+        const urlObj = new URL(window.location.href);
+        detectedTenantId = detectedTenantId || urlObj.searchParams.get('tenantId');
+        detectedGroupId = detectedGroupId || urlObj.searchParams.get('groupId');
+      } catch {
+        // ignore
+      }
+    }
+
+    // 6. If we have channelId and groupId, build canonical channel link
+    if (
+      detectedChannelId &&
+      (detectedGroupId || detectedTenantId) &&
+      (!resolvedChannelUrl || !resolvedChannelUrl.includes('/l/channel/'))
+    ) {
+      let canonical = `https://teams.microsoft.com/l/channel/${encodeURIComponent(detectedChannelId)}/${encodeURIComponent(
+        detectedChannelName || 'General'
+      )}`;
+      const q = [];
+      if (detectedGroupId) q.push(`groupId=${encodeURIComponent(detectedGroupId)}`);
+      if (detectedTenantId) q.push(`tenantId=${encodeURIComponent(detectedTenantId)}`);
+      if (q.length > 0) canonical += `?${q.join('&')}`;
+      resolvedChannelUrl = canonical;
+    }
+
+    return {
+      channelUrl: resolvedChannelUrl,
+      groupId: detectedGroupId,
+      tenantId: detectedTenantId,
+      channelId: detectedChannelId,
+      channelName: detectedChannelName,
+    };
+  }
+
+  /**
+   * Resolves the exact pinpoint deep link for a card, falling back to canonical channel deep link.
+   * Format: https://teams.microsoft.com/l/message/${threadId}/${messageId}?groupId=${groupId}&tenantId=${tenantId}
+   */
+  function resolveCardDeepLink(container, activeContext) {
+    // 1. Check if card has explicit assignment link
+    const cardAnchors = container.querySelectorAll('a[href]');
+    for (const a of cardAnchors) {
+      const href = (a.getAttribute('href') || '').trim();
+      if (
+        href &&
+        !href.startsWith('#') &&
+        !href.startsWith('javascript:') &&
+        (/assignment/i.test(href) || /\/l\/(?:assignment|entity)\//i.test(href))
+      ) {
+        return href.startsWith('http') ? href : new URL(href, window.location.origin).href;
+      }
+    }
+
+    const interactiveEls = container.querySelectorAll(
+      'button, a, [role="button"], [data-tid*="assignment"], .ac-actionSet'
+    );
+    for (const el of interactiveEls) {
+      const candidateAttrs = [
+        el.getAttribute('href'),
+        el.getAttribute('data-href'),
+        el.getAttribute('data-url'),
+        el.getAttribute('data-assignment-url'),
+        el.getAttribute('data-action-url'),
+      ];
+      for (const attr of candidateAttrs) {
+        if (attr && typeof attr === 'string') {
+          const trimmed = attr.trim();
+          if (trimmed.startsWith('http') && (/assignment/i.test(trimmed) || /\/l\//i.test(trimmed))) {
+            return trimmed;
+          }
+        }
+      }
+      const dataAction = el.getAttribute('data-action') || '';
+      const urlMatch = dataAction.match(/https?:\/\/[^\s"'<>\\]+(?:teams\.microsoft\.com|assignment)[^\s"'<>\\]*/i);
+      if (urlMatch) {
+        return urlMatch[0].replace(/&amp;/g, '&');
+      }
+    }
+
+    // 2. Check if the card container itself or the message parent ([data-mid]) contains a thread ID (19:...@thread.tacv2)
+    let threadId = null;
+    let curr = container;
+    while (curr && curr !== document.body) {
+      const combined = `${curr.getAttribute('data-thread-id') || ''} ${curr.getAttribute('data-conversation-id') || ''} ${curr.getAttribute('data-tid') || ''} ${curr.id || ''} ${curr.getAttribute('data-mid') || ''}`;
+      const match = combined.match(/19:[a-zA-Z0-9_\-]+(?:%40|@)thread\.[a-zA-Z0-9_\-]+/i);
+      if (match) {
+        threadId = decodeURIComponent(match[0]);
+        break;
+      }
+      curr = curr.parentElement;
+    }
+
+    if (!threadId && activeContext.channelId && activeContext.channelId.includes('@thread')) {
+      threadId = activeContext.channelId;
+    }
+
+    // Extract message ID from [data-mid] or ancestors
+    const msgParent =
+      container.closest('[data-mid], [data-message-id], [id^="chat-message-"], [data-tid*="message"], [role="listitem"]') ||
+      container;
+    const rawMid =
+      msgParent.getAttribute('data-mid') ||
+      msgParent.getAttribute('data-message-id') ||
+      msgParent.dataset?.mid ||
+      container.getAttribute('data-mid');
+
+    const cleanMessageId = rawMid ? String(rawMid).replace(/^chat-message-/i, '').trim() : null;
+
+    // If both thread ID and message ID exist, construct pinpoint message link:
+    // https://teams.microsoft.com/l/message/${threadId}/${messageId}?groupId=${groupId}&tenantId=${tenantId}
+    if (threadId && cleanMessageId) {
+      let pinpoint = `https://teams.microsoft.com/l/message/${encodeURIComponent(threadId)}/${encodeURIComponent(cleanMessageId)}`;
+      const q = [];
+      if (activeContext.groupId) q.push(`groupId=${encodeURIComponent(activeContext.groupId)}`);
+      if (activeContext.tenantId) q.push(`tenantId=${encodeURIComponent(activeContext.tenantId)}`);
+      if (q.length > 0) pinpoint += `?${q.join('&')}`;
+      return pinpoint;
+    }
+
+    // 3. Fallback to the active channel link resolved directly from Teams DOM
+    if (activeContext.channelUrl) {
+      return activeContext.channelUrl;
+    }
+
+    // 4. Final fallback
+    return window.location.href;
+  }
+
+  /**
    * Dispatches candidate messages to the Hark ingest API with deduplication
    * @param {Array} rawCandidates
    * @param {'network' | 'dom'} sourceLayer
@@ -429,34 +661,15 @@
       extractedTitle = 'Course Assignment';
     }
 
-    // 3. Deep Link: the href of the "View assignment" link/button
-    let cardUrl = window.location.href;
-    const viewButtons = container.querySelectorAll('a, button, [role="button"]');
-    for (const btn of viewButtons) {
-      const btnText = (btn.innerText || btn.textContent || '').trim().toLowerCase();
-      if (btnText.includes('view assignment')) {
-        if (btn.tagName === 'A' && btn.getAttribute('href')) {
-          const href = btn.getAttribute('href');
-          if (href && !href.startsWith('#') && !href.startsWith('javascript:')) {
-            cardUrl = href.startsWith('http') ? href : new URL(href, window.location.origin).href;
-            break;
-          }
-        }
-        const nestedA = btn.querySelector('a[href]');
-        if (nestedA && nestedA.getAttribute('href')) {
-          const href = nestedA.getAttribute('href');
-          if (href && !href.startsWith('#') && !href.startsWith('javascript:')) {
-            cardUrl = href.startsWith('http') ? href : new URL(href, window.location.origin).href;
-            break;
-          }
-        }
-        const dataHref = btn.getAttribute('data-href') || btn.getAttribute('data-url');
-        if (dataHref && dataHref.startsWith('http')) {
-          cardUrl = dataHref;
-          break;
-        }
-      }
-    }
+    // 3. Deep Link: exact assignment URL, button action, or canonical route deep link
+    const activeContext = getActiveTeamsChannelContext();
+    const cardUrl = resolveCardDeepLink(container, activeContext);
+
+    // Diagnostic Logging: Log resolved URL whenever an assignment card is parsed
+    console.log('%c[Hark Link Debug]', 'color: #00ffff; font-weight: bold;', {
+      detectedChannel: activeContext.channelName || getChannelName(),
+      resolvedDeepLink: cardUrl,
+    });
 
     // Deduplication key
     const domId =
@@ -594,13 +807,34 @@
         continue;
       }
 
+      // Extract message item's exact permalink if available, or generate canonical deep link
+      const activeContext = getActiveTeamsChannelContext();
+      let messageUrl = null;
+      const permalinkEl = el.querySelector(
+        'a[href*="/l/message/"], [data-tid*="copy-link"], [data-tid*="permalink"]'
+      );
+      if (permalinkEl && permalinkEl.getAttribute('href')) {
+        const href = permalinkEl.getAttribute('href').trim();
+        if (href.startsWith('http')) messageUrl = href;
+      }
+
+      if (!messageUrl) {
+        messageUrl = resolveCardDeepLink(el, activeContext);
+      }
+
+      // Diagnostic Logging: Log resolved URL whenever a chat announcement is parsed
+      console.log('%c[Hark Link Debug]', 'color: #00ffff; font-weight: bold;', {
+        detectedChannel: activeContext.channelName || getChannelName(),
+        resolvedDeepLink: messageUrl,
+      });
+
       seenBatchIds.add(id);
       extracted.push({
         id,
         text,
         sender: sender || 'Unknown',
         timestamp,
-        url: window.location.href,
+        url: messageUrl,
         source: 'dom_message',
       });
     }

@@ -165,12 +165,31 @@
         item.timestamp ||
         new Date().toISOString();
 
+      // Build exact message deep link if conversationId/threadId is available in network payload
+      let messageUrl = window.location.href;
+      const conversationId = item.conversationId || item.conversationLink || data.id;
+      if (conversationId && id && typeof conversationId === 'string' && conversationId.includes('@thread')) {
+        try {
+          const urlObj = new URL(window.location.href);
+          const tenantId = urlObj.searchParams.get('tenantId');
+          const groupId = urlObj.searchParams.get('groupId');
+          let link = `https://teams.microsoft.com/l/message/${encodeURIComponent(conversationId)}/${encodeURIComponent(id)}`;
+          const q = [];
+          if (tenantId) q.push(`tenantId=${encodeURIComponent(tenantId)}`);
+          if (groupId) q.push(`groupId=${encodeURIComponent(groupId)}`);
+          if (q.length > 0) link += `?${q.join('&')}`;
+          messageUrl = link;
+        } catch {
+          messageUrl = window.location.href;
+        }
+      }
+
       normalized.push({
         id,
         text,
         sender: sender || 'Unknown',
         timestamp,
-        url: window.location.href,
+        url: messageUrl,
         source: 'network_intercept',
       });
     }

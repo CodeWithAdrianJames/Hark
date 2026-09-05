@@ -11,7 +11,7 @@ import {
   FileText,
   AlertCircle,
 } from 'lucide-react';
-import { parseDueDate, buildGoogleCalendarUrl } from '@/lib/dateUtils';
+import { parseDueDate, buildGoogleCalendarUrl, formatTeamsDeepLink } from '@/lib/dateUtils';
 
 export interface TaskItem {
   id: string;
@@ -156,19 +156,23 @@ export const TaskCard: React.FC<TaskCardProps> = ({
 
       {/* Bottom Action Buttons: Deep Link + Calendar Intent */}
       <div className="flex items-center justify-between pt-3 border-t border-slate-800/80 mt-auto gap-2">
-        {task.source_url ? (
-          <a
-            href={task.source_url}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-400 hover:text-indigo-300 transition-colors group/link"
-          >
-            <ExternalLink className="w-3.5 h-3.5 group-hover/link:translate-x-0.5 transition-transform" />
-            <span>Open in Teams</span>
-          </a>
-        ) : (
-          <span className="text-xs text-slate-600">No link provided</span>
-        )}
+        {(() => {
+          const teamsUrl = formatTeamsDeepLink(task.source_url);
+          return teamsUrl ? (
+            <a
+              href={teamsUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              title="Open assignment or channel in Microsoft Teams"
+              className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-400 hover:text-indigo-300 transition-colors group/link"
+            >
+              <ExternalLink className="w-3.5 h-3.5 group-hover/link:translate-x-0.5 transition-transform" />
+              <span>Open in Teams</span>
+            </a>
+          ) : (
+            <span className="text-xs text-slate-600">No link provided</span>
+          );
+        })()}
 
         <a
           href={googleCalUrl}

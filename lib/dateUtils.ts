@@ -123,6 +123,27 @@ export function parseDueDate(dueDateString: string): FormattedDueStatus {
 }
 
 /**
+ * Formats and validates a Teams deep link URL so it reliably launches in the browser.
+ * Ensures an absolute https:// URL and removes any dangerous or broken schemes.
+ */
+export function formatTeamsDeepLink(url: string | null | undefined): string | null {
+  if (!url || typeof url !== 'string') return null;
+  const trimmed = url.trim();
+  if (!trimmed || trimmed === '#' || trimmed.startsWith('javascript:')) return null;
+
+  let formatted = trimmed;
+  if (formatted.startsWith('//')) {
+    formatted = 'https:' + formatted;
+  } else if (formatted.startsWith('/')) {
+    formatted = 'https://teams.microsoft.com' + formatted;
+  } else if (!/^https?:\/\//i.test(formatted)) {
+    formatted = 'https://' + formatted;
+  }
+
+  return formatted;
+}
+
+/**
  * Generates Google Calendar web intent link with UTC parameters
  * matching the user's exact local moment.
  */
@@ -145,9 +166,11 @@ export function buildGoogleCalendarUrl(task: {
     ? `[${task.course_code}] ${task.title}`
     : task.title;
 
+  const validTeamsLink = formatTeamsDeepLink(task.source_url);
+
   const detailsArray = [];
   if (task.description) detailsArray.push(task.description);
-  if (task.source_url) detailsArray.push(`Teams Thread: ${task.source_url}`);
+  if (validTeamsLink) detailsArray.push(`Teams Link: ${validTeamsLink}`);
   detailsArray.push('Organized via Hark Academic Assistant');
 
   const detailsParam = detailsArray.join('\n\n');
