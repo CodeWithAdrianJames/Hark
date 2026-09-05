@@ -199,19 +199,52 @@ export function parseDueDate(dueDateString: string, timezone = 'Asia/Manila'): F
 /**
  * Formats and validates a Teams deep link URL so it reliably launches in the browser.
  * Ensures an absolute https:// URL and removes any dangerous or broken schemes.
+ * If the link points to generic /classes/all/list, generates an official MS Teams web
+ * entity deep link with search/title hint.
  */
-export function formatTeamsDeepLink(url: string | null | undefined): string | null {
-  if (!url || typeof url !== 'string') return null;
-  const trimmed = url.trim();
-  if (!trimmed || trimmed === '#' || trimmed.startsWith('javascript:')) return null;
+export function formatTeamsDeepLink(
+  url: string | null | undefined,
+  hint?: { title?: string; course_code?: string }
+): string | null {
+  if (!url || typeof url !== 'string') {
+    if (hint?.title) {
+      return `https://teams.microsoft.com/l/entity/2a84b049-50bc-4535-a646-5677a8207868/assignments?context=${encodeURIComponent(
+        JSON.stringify({ title: hint.title, course: hint.course_code || '' })
+      )}`;
+    }
+    return null;
+  }
 
-  let formatted = trimmed;
+  let formatted = url.trim();
+  if (!formatted || formatted === '#' || formatted.startsWith('javascript:')) {
+    if (hint?.title) {
+      return `https://teams.microsoft.com/l/entity/2a84b049-50bc-4535-a646-5677a8207868/assignments?context=${encodeURIComponent(
+        JSON.stringify({ title: hint.title, course: hint.course_code || '' })
+      )}`;
+    }
+    return null;
+  }
+
   if (formatted.startsWith('//')) {
     formatted = 'https:' + formatted;
   } else if (formatted.startsWith('/')) {
-    formatted = 'https://teams.microsoft.com' + formatted;
+    if (formatted.startsWith('/classes/') || formatted.startsWith('/assignments/')) {
+      formatted = 'https://assignments.edu.cloud.microsoft' + formatted;
+    } else {
+      formatted = 'https://teams.microsoft.com' + formatted;
+    }
   } else if (!/^https?:\/\//i.test(formatted)) {
     formatted = 'https://' + formatted;
+  }
+
+  // If the link points to the generic /classes/all/list, fallback to MS Teams assignments entity with title/course hint
+  if (formatted.endsWith('/classes/all/list') || formatted.includes('/classes/all/list')) {
+    if (hint?.title) {
+      return `https://teams.microsoft.com/l/entity/2a84b049-50bc-4535-a646-5677a8207868/assignments?context=${encodeURIComponent(
+        JSON.stringify({ title: hint.title, course: hint.course_code || '' })
+      )}`;
+    }
+    return 'https://teams.microsoft.com/_#/assignments';
   }
 
   return formatted;

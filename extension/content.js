@@ -1476,6 +1476,83 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
       return `${dateHeader}, 2026 ${time}`;
     }
 
+    // Helper: Target specific deep link for an assignment row/card element
+    function extractEduCardDeepLink(cardElement) {
+      if (!cardElement) return null;
+
+      // 1. Look for explicit anchor tags: /assignments/ or assignment
+      const anchor =
+        cardElement.querySelector('a[href*="/assignments/"]') ||
+        cardElement.querySelector('a[href*="assignment"]') ||
+        (cardElement.tagName === 'A' && cardElement.getAttribute('href') ? cardElement : null) ||
+        cardElement.closest('a[href]') ||
+        cardElement.querySelector('a[href]');
+
+      if (anchor) {
+        const rawHref = (anchor.getAttribute('href') || '').trim();
+        if (rawHref && !rawHref.startsWith('#') && !rawHref.startsWith('javascript:')) {
+          // If relative path (e.g. "/classes/CLASS_ID/assignments/ASSIGN_ID")
+          if (rawHref.startsWith('/')) {
+            return new URL(rawHref, 'https://assignments.edu.cloud.microsoft').href;
+          }
+          if (/^https?:\/\//i.test(rawHref)) {
+            return rawHref;
+          }
+        }
+      }
+
+      // 2. Alternative Target: Extract ID attributes if rendered as interactive div/buttons
+      const candidateElements = [
+        cardElement,
+        ...Array.from(
+          cardElement.querySelectorAll(
+            '[data-item-id], [data-assignment-id], [data-assignmentid], [data-id], [id*="assignment"], button, [role="row"], [role="listitem"]'
+          )
+        ),
+      ];
+
+      for (const el of candidateElements) {
+        const assignmentId =
+          el.getAttribute('data-assignment-id') ||
+          el.getAttribute('data-assignmentid') ||
+          el.getAttribute('data-item-id') ||
+          el.dataset?.assignmentId ||
+          el.dataset?.itemId ||
+          el.getAttribute('data-id');
+
+        const classId =
+          el.getAttribute('data-class-id') ||
+          el.getAttribute('data-classid') ||
+          el.dataset?.classId ||
+          cardElement.getAttribute('data-class-id') ||
+          cardElement.dataset?.classId;
+
+        if (assignmentId && assignmentId.length > 5 && !assignmentId.includes(' ') && !assignmentId.startsWith('app-')) {
+          if (classId && classId.length > 5 && !classId.includes(' ')) {
+            return `https://assignments.edu.cloud.microsoft/classes/${encodeURIComponent(classId)}/assignments/${encodeURIComponent(assignmentId)}`;
+          }
+          return `https://teams.microsoft.com/l/entity/2a84b049-50bc-4535-a646-5677a8207868/assignments?context={"subEntityId":"${encodeURIComponent(assignmentId)}"}`;
+        }
+      }
+
+      // 3. Check data-url, data-href, or data-action-url
+      const actionEl = cardElement.querySelector('[data-url], [data-href], [data-action-url]');
+      if (actionEl) {
+        const dataUrl = actionEl.getAttribute('data-url') || actionEl.getAttribute('data-href') || actionEl.getAttribute('data-action-url');
+        if (dataUrl && typeof dataUrl === 'string') {
+          const trimmed = dataUrl.trim();
+          if (trimmed.startsWith('/')) {
+            return new URL(trimmed, 'https://assignments.edu.cloud.microsoft').href;
+          }
+          if (/^https?:\/\//i.test(trimmed)) {
+            return trimmed;
+          }
+        }
+      }
+
+      return null;
+    }
+
     // -------------------------------------------------------------------------
     // Method 1: Target Individual Card / Row Elements
     // -------------------------------------------------------------------------
@@ -1638,11 +1715,12 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
       const courseCode = courseBadge.replace(/^\[+|\]+$/g, '');
       const rawDueString = buildExplicitDueString(activeDateHeader, timeString, title);
 
-      // Deep link
-      let deepLink = fallbackDeepLink;
-      const linkEl = card.querySelector('a[href]') || card.closest('a[href]');
-      if (linkEl && linkEl.href && !linkEl.href.startsWith('javascript:')) {
-        deepLink = linkEl.href;
+      // Deep link resolution targeting specific assignment view
+      let deepLink = extractEduCardDeepLink(card);
+      if (!deepLink || deepLink.endsWith('/classes/all/list')) {
+        deepLink = `https://teams.microsoft.com/l/entity/2a84b049-50bc-4535-a646-5677a8207868/assignments?context=${encodeURIComponent(
+          JSON.stringify({ title, course: courseCode })
+        )}`;
       }
 
       const signature = `${title.toLowerCase()}::${courseCode.toLowerCase()}::${rawDueString.toLowerCase()}`;
@@ -1738,6 +1816,27 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
             const courseBadge = extractCourseBadge(courseText);
             const courseCode = courseBadge.replace(/^\[+|\]+$/g, '');
             const rawDueString = buildExplicitDueString(activeDateHeader, timeToken, titleLine);
+
+            // Attempt to find element matching titleLine to extract specific deepLink
+            let deepLink = null;
+            try {
+              const allCandidateEls = listRoot.querySelectorAll('a, [role="row"], [role="listitem"], [data-tid*="assignment"], h2, h3, h4, strong, div[data-is-focusable="true"]');
+              for (const candidateEl of allCandidateEls) {
+                if (candidateEl.textContent && candidateEl.textContent.includes(titleLine)) {
+                  deepLink = extractEduCardDeepLink(candidateEl.closest('a, [role="row"], [role="listitem"], [data-tid*="assignment"]') || candidateEl);
+                  if (deepLink && !deepLink.endsWith('/classes/all/list')) break;
+                }
+              }
+            } catch {
+              // ignore
+            }
+
+            if (!deepLink || deepLink.endsWith('/classes/all/list')) {
+              deepLink = `https://teams.microsoft.com/l/entity/2a84b049-50bc-4535-a646-5677a8207868/assignments?context=${encodeURIComponent(
+                JSON.stringify({ title: titleLine, course: courseCode })
+              )}`;
+            }
+
             const signature = `${titleLine.toLowerCase()}::${courseCode.toLowerCase()}::${rawDueString.toLowerCase()}`;
             if (!seenSignatures.has(signature)) {
               seenSignatures.add(signature);
@@ -1747,7 +1846,7 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
                 courseCode,
                 courseBadge,
                 rawDueString,
-                deepLink: fallbackDeepLink,
+                deepLink,
               });
             }
           }

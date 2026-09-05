@@ -713,7 +713,7 @@ export async function POST(req: NextRequest) {
         // unique_hash = sha256(`${userId}_${courseCode}_${normalizedTitle}`)
         const rawHash = computeCanonicalTaskHash(userId, cleanCode, title);
 
-        const deepLink = item.deepLink?.trim() || null;
+        const deepLink = (item.deepLink || (item as any).deep_link || (item as any).source_url || '').trim() || null;
         const description = item.description?.trim() || null;
 
         const result = await sql`
@@ -745,9 +745,15 @@ export async function POST(req: NextRequest) {
             course_id = COALESCE(EXCLUDED.course_id, tasks.course_id),
             due_date = EXCLUDED.due_date,
             description = COALESCE(EXCLUDED.description, tasks.description),
-            source_url = COALESCE(EXCLUDED.source_url, tasks.source_url),
+            source_url = CASE
+              WHEN EXCLUDED.source_url IS NOT NULL 
+                AND EXCLUDED.source_url != '' 
+                AND NOT (EXCLUDED.source_url LIKE '%/classes/all/list' AND tasks.source_url NOT LIKE '%/classes/all/list')
+              THEN EXCLUDED.source_url
+              ELSE tasks.source_url
+            END,
             updated_at = NOW()
-          RETURNING (xmax = 0) AS is_insert, id, title, due_date;
+          RETURNING (xmax = 0) AS is_insert, id, title, due_date, source_url;
         `;
 
         if (result && result.length > 0) {
@@ -775,6 +781,7 @@ export async function POST(req: NextRequest) {
           t.due_date,
           t.source_type,
           t.source_url,
+          t.source_url AS deep_link,
           t.raw_message_hash,
           t.status,
           t.created_at,

@@ -96,7 +96,7 @@ export interface RealDeliverableDefinition {
 
 export const REAL_DELIVERABLES: RealDeliverableDefinition[] = [
   {
-    titlePattern: '4_quiz',
+    titlePattern: '4 quiz',
     canonicalTitle: '4_Quiz (c/o CodeChum)',
     courseCode: 'CSIT321G1',
     courseBadge: '[CSIT321G1]',
@@ -104,7 +104,7 @@ export const REAL_DELIVERABLES: RealDeliverableDefinition[] = [
     rawDueString: 'Sep 7, 2026 1:00 AM',
   },
   {
-    titlePattern: '5_prelim',
+    titlePattern: '5 prelim',
     canonicalTitle: '5_Prelim Exam',
     courseCode: 'CSIT321G1',
     courseBadge: '[CSIT321G1]',

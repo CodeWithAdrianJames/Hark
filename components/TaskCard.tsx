@@ -22,6 +22,7 @@ export interface TaskItem {
   due_date: string;
   source_type: 'official_assignment' | 'chat_announcement' | string;
   source_url: string | null;
+  deep_link?: string | null;
   raw_message_hash: string | null;
   status: 'pending' | 'in_progress' | 'completed';
   created_at: string;
@@ -160,7 +161,11 @@ export const TaskCard: React.FC<TaskCardProps> = ({
       {/* Bottom Action Buttons: Deep Link + Calendar Intent */}
       <div className="flex items-center justify-between pt-3 border-t border-slate-800/80 mt-auto gap-2">
         {(() => {
-          const teamsUrl = formatTeamsDeepLink(task.source_url);
+          const effectiveLink = task.deep_link || task.source_url;
+          const teamsUrl = formatTeamsDeepLink(effectiveLink, {
+            title: task.title,
+            course_code: task.course_code || undefined,
+          });
           return teamsUrl ? (
             <a
               href={teamsUrl}

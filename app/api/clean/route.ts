@@ -106,6 +106,10 @@ async function performDatabaseClean(targetUserId: string) {
       const courseId = courseMap.get(normalizeCourseCode(def.courseCode)) || null;
       const canonicalHash = computeCanonicalTaskHash(targetUserId, def.courseCode, def.canonicalTitle);
 
+      const specificDeepLink = `https://teams.microsoft.com/l/entity/2a84b049-50bc-4535-a646-5677a8207868/assignments?context=${encodeURIComponent(
+        JSON.stringify({ title: def.canonicalTitle, course: def.courseCode })
+      )}`;
+
       const [inserted] = await sql`
         INSERT INTO tasks (
           user_id,
@@ -125,7 +129,7 @@ async function performDatabaseClean(targetUserId: string) {
           'Extracted from MS Teams EDU Assignments Hub',
           ${def.canonicalDueIso}::timestamptz,
           'official_assignment',
-          'https://assignments.edu.cloud.microsoft/classes/all/list',
+          ${specificDeepLink},
           ${canonicalHash},
           'pending'
         )
@@ -133,7 +137,8 @@ async function performDatabaseClean(targetUserId: string) {
         DO UPDATE SET
           title = EXCLUDED.title,
           due_date = EXCLUDED.due_date,
-          course_id = EXCLUDED.course_id
+          course_id = EXCLUDED.course_id,
+          source_url = EXCLUDED.source_url
         RETURNING id;
       `;
       if (inserted) {
@@ -160,9 +165,15 @@ async function performDatabaseClean(targetUserId: string) {
         }
       }
 
-      // Update best match to canonical due date, course, and canonical hash
+      // Update best match to canonical due date, course, canonical hash, and specific deep link
       const canonicalHash = computeCanonicalTaskHash(targetUserId, def.courseCode, def.canonicalTitle);
       const courseId = courseMap.get(normalizeCourseCode(def.courseCode)) || bestMatch.course_id;
+      const currentUrl = bestMatch.source_url || '';
+      const finalUrl = (!currentUrl || currentUrl.endsWith('/classes/all/list'))
+        ? `https://teams.microsoft.com/l/entity/2a84b049-50bc-4535-a646-5677a8207868/assignments?context=${encodeURIComponent(
+            JSON.stringify({ title: def.canonicalTitle, course: def.courseCode })
+          )}`
+        : currentUrl;
 
       await sql`
         UPDATE tasks
@@ -170,6 +181,7 @@ async function performDatabaseClean(targetUserId: string) {
           title = ${def.canonicalTitle},
           due_date = ${def.canonicalDueIso}::timestamptz,
           course_id = ${courseId},
+          source_url = ${finalUrl},
           raw_message_hash = ${canonicalHash},
           updated_at = NOW()
         WHERE id = ${bestMatch.id}::uuid;
@@ -202,6 +214,7 @@ async function performDatabaseClean(targetUserId: string) {
       t.due_date,
       t.source_type,
       t.source_url,
+      t.source_url AS deep_link,
       t.raw_message_hash,
       t.status,
       t.created_at,
