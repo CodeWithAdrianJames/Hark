@@ -42,13 +42,85 @@ interface IngestMessage {
   isNativeCard?: boolean;
   title?: string;
   rawDueString?: string;
+  courseName?: string;
+  courseCode?: string;
+  channelName?: string;
 }
 
 interface IngestPayload {
   userId: string;
-  channelName: string;
+  channelName?: string;
+  courseName?: string;
+  courseCode?: string;
   messages: IngestMessage[];
   timezone?: string;
+}
+
+/**
+ * Cleans any noisy prefix/suffix/notification artifacts from team or course titles
+ */
+function cleanCourseName(raw: string | null | undefined): string {
+  if (!raw || typeof raw !== 'string') return '';
+  let text = raw.trim();
+
+  // Strip notification badges: (1), (99+), etc.
+  text = text.replace(/^\(\d+\+?\)\s*/, '');
+  text = text.replace(/[\u{1F514}\u{25CF}\u{25CB}\u{2022}]/gu, '');
+  text = text.replace(/\s*\d+\s+unread.*$/i, '');
+
+  // Strip generic prefixes/suffixes
+  text = text.replace(/^(?:teams\s+and\s+channels|microsoft\s+teams|teams|chats?)\s*[|:›>–—\-]\s*/i, '');
+  text = text.replace(/\s*[|:›>–—\-]\s*(?:microsoft\s+teams|teams|general)$/i, '');
+
+  if (text.includes('|') || text.includes('>') || text.includes('›')) {
+    const parts = text.split(/[|›>]/).map((p) => p.trim()).filter(Boolean);
+    const filtered = parts.filter((p) => {
+      const lower = p.toLowerCase();
+      return (
+        !lower.includes('teams and channels') &&
+        !lower.includes('microsoft teams') &&
+        lower !== 'general' &&
+        lower !== 'teams' &&
+        lower !== 'chat' &&
+        lower !== 'conversations'
+      );
+    });
+    if (filtered.length > 0) text = filtered[0];
+  }
+
+  // Filter out pure SPA noise
+  const lowerFinal = text.toLowerCase().trim();
+  if (
+    !lowerFinal ||
+    lowerFinal === 'teams' ||
+    lowerFinal === 'general' ||
+    lowerFinal === 'microsoft teams' ||
+    lowerFinal === 'conversations' ||
+    lowerFinal === 'chat' ||
+    lowerFinal === 'null' ||
+    lowerFinal === 'undefined'
+  ) {
+    return '';
+  }
+
+  return text.trim();
+}
+
+/**
+ * Extracts a concise course code (e.g. IT317, CS311, CSIT321G1, RIZAL031) from a course title
+ */
+function extractCourseCode(cleanName: string): string {
+  if (!cleanName) return 'GENERAL';
+  const match = cleanName.match(/\b([A-Z]{2,6}\s*(?:-|\s)?\s*\d{2,4}[A-Z0-9]*)\b/i);
+  if (match) {
+    return match[1].replace(/[\s\-]/g, '').toUpperCase();
+  }
+  const bracketMatch = cleanName.match(/\[([A-Za-z0-9_\-]+)\]/);
+  if (bracketMatch && bracketMatch[1].length <= 15) {
+    return bracketMatch[1].toUpperCase();
+  }
+  const firstWord = cleanName.split(/[\s\[\(\-]/)[0];
+  return firstWord && firstWord.length <= 15 ? firstWord.toUpperCase() : cleanName.slice(0, 20).toUpperCase();
 }
 
 interface GeminiExtractionResult {
@@ -417,7 +489,7 @@ function normalizeSourceUrl(url: string | null | undefined): string | null {
 export async function POST(req: NextRequest) {
   try {
     const body = (await req.json()) as Partial<IngestPayload>;
-    const { userId, channelName, messages } = body;
+    const { userId, channelName, courseName, courseCode, messages } = body;
     const userTimezone = (body.timezone || '').trim() || 'Asia/Manila';
 
     // Validate request payload
@@ -517,45 +589,58 @@ export async function POST(req: NextRequest) {
 
     // Fetch user's existing courses from Neon
     const existingCourses = await sql`
-      SELECT id, code, channel_id
+      SELECT id, code, name, channel_id
       FROM courses
       WHERE user_id = ${userId}::uuid
     `;
 
-    const userCourses: Array<{ id: string; code: string; channel_id: string | null }> =
+    const userCourses: Array<{ id: string; code: string; name: string; channel_id: string | null }> =
       existingCourses.map((c: Record<string, unknown>) => ({
         id: c.id as string,
-        code: c.code as string,
+        code: (c.code as string) || '',
+        name: (c.name as string) || (c.code as string) || '',
         channel_id: (c.channel_id as string | null) ?? null,
       }));
 
-    // Helper to resolve or auto-create course
-    async function resolveCourseId(courseHint: string | null | undefined): Promise<string | null> {
-      const target = (courseHint || channelName || 'COURSE').trim();
-      if (!target) return null;
-      const upper = target.toUpperCase();
+    // Helper to resolve or auto-create verified course
+    async function resolveCourseId(
+      courseNameHint?: string | null,
+      courseCodeHint?: string | null
+    ): Promise<string | null> {
+      const rawTarget = (courseNameHint || courseName || courseCodeHint || courseCode || channelName || '').trim();
+      let cleanName = cleanCourseName(rawTarget);
+      if (!cleanName) {
+        cleanName = cleanCourseName(channelName || '') || 'General';
+      }
 
+      const cleanCode = (courseCodeHint && courseCodeHint.length <= 15 && !courseCodeHint.includes(' '))
+        ? courseCodeHint.toUpperCase()
+        : extractCourseCode(cleanName);
+
+      // 1. Try matching existing course for this user (by exact code or name)
       const matched = userCourses.find(
         (c) =>
-          c.code.toUpperCase() === upper ||
-          (c.channel_id && c.channel_id.toLowerCase() === target.toLowerCase())
+          c.code.toUpperCase() === cleanCode.toUpperCase() ||
+          c.name.toLowerCase() === cleanName.toLowerCase() ||
+          (cleanName.length > 5 && c.name.toLowerCase().includes(cleanName.toLowerCase())) ||
+          (c.name.length > 5 && cleanName.toLowerCase().includes(c.name.toLowerCase()))
       );
 
       if (matched) return matched.id;
 
+      // 2. Create clean course entry in DB if none matched
       try {
-        const code = upper.slice(0, 50);
-        const name = target;
         const [newCourse] = await sql`
           INSERT INTO courses (user_id, code, name, channel_id)
-          VALUES (${userId}::uuid, ${code}, ${name}, ${channelName || null})
-          RETURNING id, code, channel_id
+          VALUES (${userId}::uuid, ${cleanCode.slice(0, 50)}, ${cleanName}, ${channelName || null})
+          RETURNING id, code, name, channel_id
         `;
         if (newCourse) {
           const id = newCourse.id as string;
           userCourses.push({
             id,
             code: newCourse.code as string,
+            name: newCourse.name as string,
             channel_id: (newCourse.channel_id as string | null) ?? null,
           });
           return id;
@@ -649,13 +734,17 @@ export async function POST(req: NextRequest) {
         continue;
       }
 
-      const courseId = await resolveCourseId(channelName);
+      const verifiedCourseName = cleanCourseName(msg.courseName || courseName || channelName || '') || 'General';
+      const verifiedCourseCode = (msg.courseCode || (courseCode && courseCode.length <= 15))
+        ? (msg.courseCode || courseCode)
+        : extractCourseCode(verifiedCourseName);
+      const courseId = await resolveCourseId(verifiedCourseName, verifiedCourseCode);
 
       tasksToInsert.push({
         user_id: userId,
         course_id: courseId,
         title: rawTitle,
-        description: `Official assignment from ${channelName || 'MS Teams'}. Due: ${msg.rawDueString}`,
+        description: `Official assignment from ${verifiedCourseName}. Due: ${msg.rawDueString}`,
         due_date: resolvedDueDate,
         source_type: 'official_assignment',
         source_url: msg.url ? String(msg.url).trim() : null,
@@ -681,9 +770,16 @@ export async function POST(req: NextRequest) {
         const settledBatch = await Promise.allSettled(
           batch.map(async ({ hash, msg }) => {
             const referenceTimestamp = msg.timestamp || new Date().toISOString();
+            const verifiedCourseName = cleanCourseName(msg.courseName || courseName || channelName || '') || 'Academic Course';
+            const verifiedCourseCode = (msg.courseCode || (courseCode && courseCode.length <= 15))
+              ? (msg.courseCode || courseCode)
+              : extractCourseCode(verifiedCourseName);
+
             const prompt = `You are an academic assistant analyzing messages from a university course channel.
 
 Message Details:
+- Active Course Context: "${verifiedCourseName}"
+- Course Code: "${verifiedCourseCode}"
 - Channel: "${channelName || 'General'}"
 - Sender: "${msg.sender || 'Unknown'}"
 - Sent Timestamp (Base Reference Time): "${referenceTimestamp}"
@@ -703,9 +799,13 @@ Critical Timezone & Deadline Instructions:
 2. The message was sent at "${referenceTimestamp}". Resolve all relative dates using this timestamp mapped to the user's timezone.
 3. Always return 'due_date_iso' as a fully qualified ISO 8601 string including the correct timezone offset (e.g. "2026-09-06T23:59:00+08:00") or converted cleanly to UTC with an exact Z suffix matching that exact local moment.
 4. If only a date is mentioned without a specific time, assume 23:59:59 on that date in the user's local timezone ("${userTimezone}").
-5. Extract concise title, description (instructions or submission links), and course code.
+5. Extract concise title and description (instructions or submission links).
 6. Return false for is_assignment if this is casual communication, greetings, or general Q&A without a clear actionable assignment or resolvable deadline.
-7. If no deadline or due date can be resolved, return due_date_iso as null.`;
+7. If no deadline or due date can be resolved, return due_date_iso as null.
+
+CRITICAL COURSE CONTEXT RULES (ANTI-HALLUCINATION):
+- DO NOT invent, guess, or hallucinate course names or course codes. You MUST use the exact 'Active Course Context' provided ("${verifiedCourseName}") and set course_code to "${verifiedCourseCode}".
+- If an assignment text explicitly specifies a sub-section or lab code within that course, you may note that, but NEVER generate unrelated generic codes (e.g., CS101, ENG201, MATH101) not provided in the input.`;
 
             const modelName = process.env.GEMINI_MODEL || 'gemini-3.6-flash';
             let response;
@@ -782,7 +882,19 @@ Critical Timezone & Deadline Instructions:
           continue;
         }
 
-        const courseId = await resolveCourseId(extraction.course_code);
+        const verifiedCourseName = cleanCourseName(msg.courseName || courseName || channelName || '') || 'General';
+        const verifiedCourseCode = (msg.courseCode || (courseCode && courseCode.length <= 15))
+          ? (msg.courseCode || courseCode)
+          : extractCourseCode(verifiedCourseName);
+
+        // Filter out generic hallucinated codes
+        const hallucinatedCodes = ['CS101', 'ENG101', 'ENG201', 'MATH101', 'MATH200', 'PHYS211', 'COURSE', 'GENERAL'];
+        const returnedCode = (extraction.course_code || '').trim().toUpperCase();
+        const finalCourseCode = (returnedCode && !hallucinatedCodes.includes(returnedCode) && returnedCode.length <= 15)
+          ? returnedCode
+          : verifiedCourseCode;
+
+        const courseId = await resolveCourseId(verifiedCourseName, finalCourseCode);
 
         tasksToInsert.push({
           user_id: userId,

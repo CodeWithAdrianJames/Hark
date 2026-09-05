@@ -117,24 +117,190 @@
   }
 
   /**
+   * Cleans any noisy prefix/suffix/notification artifacts from team or course titles
+   */
+  function cleanCourseOrTeamName(raw) {
+    if (!raw || typeof raw !== 'string') return '';
+    let text = raw.trim();
+
+    // 1. Remove notification counts: (1), (99+), etc.
+    text = text.replace(/^\(\d+\+?\)\s*/, '');
+
+    // 2. Remove notification icons or unread badges
+    text = text.replace(/[\u{1F514}\u{25CF}\u{25CB}\u{2022}]/gu, ''); // bell, bullets
+    text = text.replace(/\s*\d+\s+unread(?:\s+activities|\s+messages|\s+mentions)?/gi, '');
+    text = text.replace(/\s*unread\s*$/i, '');
+
+    // 3. Remove common Teams shell noise
+    text = text.replace(/^(?:teams\s+and\s+channels|microsoft\s+teams|teams|chats?)\s*[|:›>–—\-]\s*/i, '');
+    text = text.replace(/\s*[|:›>–—\-]\s*(?:microsoft\s+teams|teams|general)$/i, '');
+
+    // 4. If split by pipes or breadcrumbs: find the most descriptive course segment
+    // e.g. "Teams and Channels | IT317[G1][1stSem/26-27]AMPARO | General | Microsoft Teams"
+    if (text.includes('|') || text.includes('>') || text.includes('›')) {
+      const parts = text.split(/[|›>]/).map((p) => p.trim()).filter(Boolean);
+      const filtered = parts.filter((p) => {
+        const lower = p.toLowerCase();
+        return (
+          !lower.includes('teams and channels') &&
+          !lower.includes('microsoft teams') &&
+          lower !== 'general' &&
+          lower !== 'teams' &&
+          lower !== 'chat' &&
+          lower !== 'conversations'
+        );
+      });
+      if (filtered.length > 0) {
+        text = filtered[0];
+      }
+    }
+
+    const lowerFinal = text.toLowerCase().trim();
+    if (
+      !lowerFinal ||
+      lowerFinal === 'teams' ||
+      lowerFinal === 'general' ||
+      lowerFinal === 'microsoft teams' ||
+      lowerFinal === 'conversations' ||
+      lowerFinal === 'chat' ||
+      lowerFinal === 'null' ||
+      lowerFinal === 'undefined'
+    ) {
+      return '';
+    }
+
+    return text.trim();
+  }
+
+  /**
+   * Extracts a concise course code (e.g. IT317, CS311, CSIT321G1, RIZAL031) from a course title
+   */
+  function extractCourseCode(cleanName) {
+    if (!cleanName || typeof cleanName !== 'string') return 'COURSE';
+    const match = cleanName.match(/\b([A-Z]{2,6}\s*(?:-|\s)?\s*\d{2,4}[A-Z0-9]*)\b/i);
+    if (match) {
+      return match[1].replace(/[\s\-]/g, '').toUpperCase();
+    }
+    const bracketMatch = cleanName.match(/\[([A-Za-z0-9_\-]+)\]/);
+    if (bracketMatch && bracketMatch[1].length <= 15) {
+      return bracketMatch[1].toUpperCase();
+    }
+    const firstWord = cleanName.split(/[\s\[\(\-]/)[0];
+    return firstWord && firstWord.length <= 15 ? firstWord.toUpperCase() : cleanName.slice(0, 20).toUpperCase();
+  }
+
+  /**
+   * Ground-truth extraction of active Team Name and Channel Name directly from Teams DOM.
+   * Avoids hallucinated or generic names.
+   */
+  function getVerifiedTeamAndCourseContext() {
+    let resolvedTeamName = '';
+    let resolvedChannelName = '';
+
+    // 1. Check Channel Name from specific header element
+    const channelHeaderEl =
+      document.querySelector('[data-tid="channel-name"]') ||
+      document.querySelector('[data-tid="chat-header-title"]') ||
+      document.querySelector('[data-tid="thread-header-title"]');
+    if (channelHeaderEl && channelHeaderEl.textContent.trim()) {
+      resolvedChannelName = channelHeaderEl.textContent.trim();
+    }
+
+    // 2. Query top team breadcrumbs / team header title in chat pane
+    const teamHeaderSelectors = [
+      '[data-tid="team-name"]',
+      '[data-tid="channel-header-team-name"]',
+      '[data-tid="team-header-title"]',
+      '[data-tid="header-team-name"]',
+      '.team-title',
+      '[data-tid*="breadcrumbs"] [data-tid*="team"]',
+      '[data-tid="channel-header"] [role="heading"]',
+    ];
+
+    for (const sel of teamHeaderSelectors) {
+      const el = document.querySelector(sel);
+      if (el && el.textContent.trim()) {
+        const candidate = cleanCourseOrTeamName(el.textContent);
+        if (candidate) {
+          resolvedTeamName = candidate;
+          break;
+        }
+      }
+    }
+
+    // 3. Query the active channel in left sidebar and ascend to parent Team title
+    if (!resolvedTeamName) {
+      const activeChannelNode = document.querySelector(
+        '[role="treeitem"][aria-selected="true"], [role="treeitem"][aria-current="true"], [data-tid*="active-channel"], [data-tid*="channel-list-item"][aria-selected="true"]'
+      );
+
+      if (activeChannelNode) {
+        if (!resolvedChannelName) {
+          resolvedChannelName = activeChannelNode.textContent?.trim() || '';
+        }
+
+        // Check parent group treeitem
+        const teamParent = activeChannelNode.closest(
+          '[data-team-id], [data-group-id], [data-tid*="team-channel-list"], [data-tid*="team-list-item"]'
+        );
+
+        if (teamParent) {
+          const titleEl = teamParent.querySelector(
+            '[data-tid*="team-name"], [data-tid*="team-title"], h3, [role="heading"], button[aria-expanded]'
+          );
+          if (titleEl && titleEl.textContent.trim()) {
+            const candidate = cleanCourseOrTeamName(titleEl.textContent);
+            if (candidate) resolvedTeamName = candidate;
+          }
+        }
+
+        if (!resolvedTeamName) {
+          // Look at previous heading in sidebar hierarchy
+          const parentTreeItem = activeChannelNode.closest('[role="group"]')?.parentElement;
+          if (parentTreeItem) {
+            const heading = parentTreeItem.querySelector('h3, [data-tid*="team"], button, span');
+            if (heading && heading.textContent.trim()) {
+              const candidate = cleanCourseOrTeamName(heading.textContent);
+              if (candidate) resolvedTeamName = candidate;
+            }
+          }
+        }
+      }
+    }
+
+    // 4. Fallback: Parse and clean document.title
+    if (!resolvedTeamName && document.title) {
+      const candidate = cleanCourseOrTeamName(document.title);
+      if (candidate) resolvedTeamName = candidate;
+    }
+
+    // If channel name not found, try document.title channel component
+    if (!resolvedChannelName && document.title) {
+      const parts = document.title.split('|').map((p) => p.trim());
+      if (parts.length >= 3 && parts[parts.length - 2] && !/microsoft teams/i.test(parts[parts.length - 2])) {
+        resolvedChannelName = parts[parts.length - 2];
+      }
+    }
+
+    resolvedChannelName = resolvedChannelName || 'General';
+    resolvedTeamName = resolvedTeamName || resolvedChannelName || 'MS Teams Course';
+
+    const courseCode = extractCourseCode(resolvedTeamName);
+
+    return {
+      teamName: resolvedTeamName,
+      courseName: resolvedTeamName,
+      courseCode: courseCode,
+      channelName: resolvedChannelName,
+    };
+  }
+
+  /**
    * Resolves the current channel or chat name
    */
   function getChannelName() {
-    const headerEl =
-      document.querySelector('[data-tid="channel-name"]') ||
-      document.querySelector('[data-tid="chat-header-title"]') ||
-      document.querySelector('[data-tid="thread-header-title"]') ||
-      document.querySelector('h2[data-tid*="header"]');
-
-    if (headerEl && headerEl.textContent.trim()) {
-      return headerEl.textContent.trim();
-    }
-
-    if (document.title) {
-      return document.title.replace(/\s*\|\s*Microsoft Teams$/i, '').trim() || 'MS Teams Channel';
-    }
-
-    return 'MS Teams Channel';
+    const verified = getVerifiedTeamAndCourseContext();
+    return verified.channelName || 'General';
   }
 
   /**
@@ -416,12 +582,24 @@
       'font-weight: normal;'
     );
 
+    const verifiedContext = getVerifiedTeamAndCourseContext();
     const clientTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Manila';
+
+    // Enrich every candidate message with verified ground-truth course context
+    const enrichedMessages = newMessages.map((msg) => ({
+      ...msg,
+      courseName: msg.courseName || verifiedContext.courseName,
+      courseCode: msg.courseCode || verifiedContext.courseCode,
+      channelName: msg.channelName || verifiedContext.channelName,
+    }));
+
     const payload = {
       userId: config.userId,
-      channelName: getChannelName(),
+      channelName: verifiedContext.channelName,
+      courseName: verifiedContext.courseName,
+      courseCode: verifiedContext.courseCode,
       timezone: clientTimezone,
-      messages: newMessages,
+      messages: enrichedMessages,
     };
 
     try {
@@ -702,13 +880,17 @@
     }
     if (seenBatchIds) seenBatchIds.add(id);
 
-    // Format directly for the fast-path bypass
+    // Format directly for the fast-path bypass with verified ground-truth course context
+    const verified = getVerifiedTeamAndCourseContext();
     return {
       id,
       isNativeCard: true,
       title: extractedTitle,
       rawDueString: extractedDueDate,
       url: cardUrl,
+      courseName: verified.courseName,
+      courseCode: verified.courseCode,
+      channelName: verified.channelName,
       sender: 'Assignments Bot',
       timestamp: new Date().toISOString(),
       text: `Assignment: ${extractedTitle}. Due: ${extractedDueDate}`,
@@ -844,12 +1026,16 @@
       });
 
       seenBatchIds.add(id);
+      const verified = getVerifiedTeamAndCourseContext();
       extracted.push({
         id,
         text,
         sender: sender || 'Unknown',
         timestamp,
         url: messageUrl,
+        courseName: verified.courseName,
+        courseCode: verified.courseCode,
+        channelName: verified.channelName,
         source: 'dom_message',
       });
     }
