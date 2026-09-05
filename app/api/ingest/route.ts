@@ -3,6 +3,7 @@ import crypto from 'crypto';
 import { GoogleGenAI, Type } from '@google/genai';
 import { getDb } from '@/lib/db';
 import { getStartOfToday } from '@/lib/dateUtils';
+import { computeCanonicalTaskHash, normalizeCourseCode } from '@/lib/schema';
 
 export const dynamic = 'force-dynamic';
 
@@ -111,16 +112,7 @@ function cleanCourseName(raw: string | null | undefined): string {
  */
 function extractCourseCode(cleanName: string): string {
   if (!cleanName) return 'GENERAL';
-  const match = cleanName.match(/\b([A-Z]{2,6}\s*(?:-|\s)?\s*\d{2,4}[A-Z0-9]*)\b/i);
-  if (match) {
-    return match[1].replace(/[\s\-]/g, '').toUpperCase();
-  }
-  const bracketMatch = cleanName.match(/\[([A-Za-z0-9_\-]+)\]/);
-  if (bracketMatch && bracketMatch[1].length <= 15) {
-    return bracketMatch[1].toUpperCase();
-  }
-  const firstWord = cleanName.split(/[\s\[\(\-]/)[0];
-  return firstWord && firstWord.length <= 15 ? firstWord.toUpperCase() : cleanName.slice(0, 20).toUpperCase();
+  return normalizeCourseCode(cleanName);
 }
 
 interface GeminiExtractionResult {
@@ -668,6 +660,8 @@ export async function POST(req: NextRequest) {
       const assignments = body.assignments as Array<{
         title?: string;
         courseName?: string;
+        courseCode?: string;
+        courseBadge?: string;
         rawDueString?: string;
         deepLink?: string;
         description?: string;
@@ -710,14 +704,14 @@ export async function POST(req: NextRequest) {
 
         // Ground-truth course resolution
         const cleanName = cleanCourseName(item.courseName) || 'General';
-        const cleanCode = extractCourseCode(cleanName);
+        const cleanCode = item.courseCode
+          ? normalizeCourseCode(item.courseCode)
+          : extractCourseCode(cleanName);
         const courseId = await resolveCourseForUser(sql, userId, cleanName, cleanCode, userCourses);
 
-        // Deterministic raw message hash
-        const rawHash = crypto
-          .createHash('sha256')
-          .update(`assignment:${userId}:${title}:${cleanCode}:${rawDue}`)
-          .digest('hex');
+        // Deterministic canonical raw message hash:
+        // unique_hash = sha256(`${userId}_${courseCode}_${normalizedTitle}`)
+        const rawHash = computeCanonicalTaskHash(userId, cleanCode, title);
 
         const deepLink = item.deepLink?.trim() || null;
         const description = item.description?.trim() || null;
@@ -748,6 +742,7 @@ export async function POST(req: NextRequest) {
           ON CONFLICT (raw_message_hash)
           DO UPDATE SET
             title = EXCLUDED.title,
+            course_id = COALESCE(EXCLUDED.course_id, tasks.course_id),
             due_date = EXCLUDED.due_date,
             description = COALESCE(EXCLUDED.description, tasks.description),
             source_url = COALESCE(EXCLUDED.source_url, tasks.source_url),
@@ -769,14 +764,36 @@ export async function POST(req: NextRequest) {
         `[Fast-Path] Processed ${assignments.length} assignments: ${insertedCount} inserted, ${updatedCount} updated, 0 skipped.`
       );
 
+      // Query active user tasks joined with courses so dashboard receives the full fresh list
+      const cleanTasks = await sql`
+        SELECT 
+          t.id,
+          t.user_id,
+          t.course_id,
+          t.title,
+          t.description,
+          t.due_date,
+          t.source_type,
+          t.source_url,
+          t.raw_message_hash,
+          t.status,
+          t.created_at,
+          c.code AS course_code,
+          c.name AS course_name
+        FROM tasks t
+        LEFT JOIN courses c ON t.course_id = c.id
+        WHERE t.user_id = ${userId}::uuid
+        ORDER BY t.due_date ASC;
+      `;
+
       return jsonResponse(
         {
           success: true,
-          count: insertedCount + updatedCount,
+          count: cleanTasks.length,
           inserted: insertedCount,
           updated: updatedCount,
           skipped: 0,
-          tasks: syncedTasks,
+          tasks: cleanTasks,
         },
         200
       );

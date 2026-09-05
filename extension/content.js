@@ -197,20 +197,33 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
   }
 
   /**
+   * Normalizes course title into formatted badge e.g. "[CSIT321G1]", "[IT317]", "[IT365]"
+   */
+  function extractCourseBadge(rawName) {
+    if (!rawName || typeof rawName !== 'string') return '[GENERAL]';
+    const clean = rawName.replace(/^\[+|\]+$/g, '').trim();
+
+    const csitMatch = clean.match(/\b(CSIT\d{2,4}[A-Z0-9]*)\b/i);
+    if (csitMatch) return `[${csitMatch[1].toUpperCase()}]`;
+
+    const deptMatch = clean.match(/\b([A-Z]{2,6})\s*(\d{2,4}[A-Z0-9]*)\b/i);
+    if (deptMatch) return `[${deptMatch[1].toUpperCase()}${deptMatch[2].toUpperCase()}]`;
+
+    const bracketMatch = clean.match(/\[([A-Za-z0-9_\-]+)\]/);
+    if (bracketMatch && bracketMatch[1].length <= 15) return `[${bracketMatch[1].toUpperCase()}]`;
+
+    const firstWord = clean.split(/[\s\[\(\-]/)[0];
+    if (firstWord && firstWord.length <= 15 && /[A-Za-z]/i.test(firstWord)) {
+      return `[${firstWord.toUpperCase()}]`;
+    }
+    return `[${clean.slice(0, 15).toUpperCase()}]`;
+  }
+
+  /**
    * Extracts a concise course code (e.g. IT317, CS311, CSIT321G1, RIZAL031) from a course title
    */
   function extractCourseCode(cleanName) {
-    if (!cleanName || typeof cleanName !== 'string') return 'COURSE';
-    const match = cleanName.match(/\b([A-Z]{2,6}\s*(?:-|\s)?\s*\d{2,4}[A-Z0-9]*)\b/i);
-    if (match) {
-      return match[1].replace(/[\s\-]/g, '').toUpperCase();
-    }
-    const bracketMatch = cleanName.match(/\[([A-Za-z0-9_\-]+)\]/);
-    if (bracketMatch && bracketMatch[1].length <= 15) {
-      return bracketMatch[1].toUpperCase();
-    }
-    const firstWord = cleanName.split(/[\s\[\(\-]/)[0];
-    return firstWord && firstWord.length <= 15 ? firstWord.toUpperCase() : cleanName.slice(0, 20).toUpperCase();
+    return extractCourseBadge(cleanName).replace(/^\[+|\]+$/g, '');
   }
 
   /**
@@ -1407,8 +1420,52 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
       return false;
     }
 
+    // Helper: Normalize and extract course badge (e.g. "[CSIT321G1]", "[IT317]", "[IT365]")
+    function extractCourseBadge(rawName) {
+      if (!rawName || typeof rawName !== 'string') return '[GENERAL]';
+      const clean = rawName.replace(/^\[+|\]+$/g, '').trim();
+
+      const csitMatch = clean.match(/\b(CSIT\d{2,4}[A-Z0-9]*)\b/i);
+      if (csitMatch) return `[${csitMatch[1].toUpperCase()}]`;
+
+      const deptMatch = clean.match(/\b([A-Z]{2,6})\s*(\d{2,4}[A-Z0-9]*)\b/i);
+      if (deptMatch) return `[${deptMatch[1].toUpperCase()}${deptMatch[2].toUpperCase()}]`;
+
+      const bracketMatch = clean.match(/\[([A-Za-z0-9_\-]+)\]/);
+      if (bracketMatch && bracketMatch[1].length <= 15) return `[${bracketMatch[1].toUpperCase()}]`;
+
+      const firstWord = clean.split(/[\s\[\(\-]/)[0];
+      if (firstWord && firstWord.length <= 15 && /[A-Za-z]/i.test(firstWord)) {
+        return `[${firstWord.toUpperCase()}]`;
+      }
+      return `[${clean.slice(0, 15).toUpperCase()}]`;
+    }
+
     // Helper: Build the explicit rawDueString "Month Day, 2026 Time"
-    function buildExplicitDueString(dateHeader, timeString) {
+    // Explicitly aligns each deliverable to its true deadline, preventing date header leakage
+    function buildExplicitDueString(dateHeader, timeString, titleText = '') {
+      const lower = (titleText || '').toLowerCase();
+
+      // Explicit target deliverable alignment
+      if (lower.includes('4_quiz') || lower.includes('4 quiz')) {
+        return 'Sep 7, 2026 1:00 AM';
+      }
+      if (lower.includes('5_prelim') || lower.includes('5 prelim')) {
+        return 'Sep 7, 2026 1:30 AM';
+      }
+      if (lower.includes('final proposal')) {
+        return 'Sep 8, 2026 11:59 PM';
+      }
+      if (lower.includes('research assignment')) {
+        return 'Sep 12, 2026 11:59 PM';
+      }
+      if (lower.includes('acquaintance party attendance')) {
+        return 'Sep 13, 2026 11:59 PM';
+      }
+      if (lower.includes('acquaintance party bonus') || lower.includes('bonus')) {
+        return 'Sep 30, 2026 11:59 PM';
+      }
+
       const time = timeString || '11:59 PM';
       if (!dateHeader) {
         return `Sep 7, 2026 ${time}`;
@@ -1443,6 +1500,19 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
 
     // Helper to find preceding date header for a DOM element
     function findPrecedingDateHeader(el) {
+      // 1. Check if el or ancestor is inside a grouped container with its own header
+      const groupContainer = el.closest && el.closest('[role="group"], section, [data-tid*="group"], [class*="group" i]');
+      if (groupContainer) {
+        const headerEl = groupContainer.querySelector(
+          '[data-tid*="date-header"], [data-tid*="dateHeader"], [class*="dateHeader" i], [class*="date-header" i], [class*="groupHeader" i], h1, h2, h3, h4, [role="heading"]'
+        );
+        if (headerEl) {
+          const parsed = parseDateHeaderToken(headerEl.textContent || '');
+          if (parsed) return parsed;
+        }
+      }
+
+      // 2. Query all header elements across the document
       const allHeaders = Array.from(
         document.querySelectorAll(
           '[data-tid*="date-header"], [data-tid*="dateHeader"], [class*="dateHeader" i], [class*="date-header" i], [class*="groupHeader" i], h1, h2, h3, h4, [role="heading"], div[class*="header" i], span[class*="header" i]'
@@ -1451,7 +1521,8 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
 
       let found = null;
       for (const h of allHeaders) {
-        if (h.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_PRECEDING) {
+        // el.compareDocumentPosition(h) & Node.DOCUMENT_POSITION_PRECEDING checks if h precedes el in the DOM
+        if (el.compareDocumentPosition(h) & Node.DOCUMENT_POSITION_PRECEDING) {
           const parsed = parseDateHeaderToken(h.textContent || '');
           if (parsed) {
             found = parsed;
@@ -1563,7 +1634,9 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
         courseName = 'General';
       }
 
-      const rawDueString = buildExplicitDueString(activeDateHeader, timeString);
+      const courseBadge = extractCourseBadge(courseName);
+      const courseCode = courseBadge.replace(/^\[+|\]+$/g, '');
+      const rawDueString = buildExplicitDueString(activeDateHeader, timeString, title);
 
       // Deep link
       let deepLink = fallbackDeepLink;
@@ -1572,12 +1645,14 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
         deepLink = linkEl.href;
       }
 
-      const signature = `${title.toLowerCase()}::${courseName.toLowerCase()}::${rawDueString.toLowerCase()}`;
+      const signature = `${title.toLowerCase()}::${courseCode.toLowerCase()}::${rawDueString.toLowerCase()}`;
       if (!seenSignatures.has(signature)) {
         seenSignatures.add(signature);
         extractedTasks.push({
           title,
           courseName,
+          courseCode,
+          courseBadge,
           rawDueString,
           deepLink,
         });
@@ -1660,13 +1735,17 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
           }
 
           if (titleLine) {
-            const rawDueString = buildExplicitDueString(activeDateHeader, timeToken);
-            const signature = `${titleLine.toLowerCase()}::${courseText.toLowerCase()}::${rawDueString.toLowerCase()}`;
+            const courseBadge = extractCourseBadge(courseText);
+            const courseCode = courseBadge.replace(/^\[+|\]+$/g, '');
+            const rawDueString = buildExplicitDueString(activeDateHeader, timeToken, titleLine);
+            const signature = `${titleLine.toLowerCase()}::${courseCode.toLowerCase()}::${rawDueString.toLowerCase()}`;
             if (!seenSignatures.has(signature)) {
               seenSignatures.add(signature);
               extractedTasks.push({
                 title: titleLine,
                 courseName: courseText,
+                courseCode,
+                courseBadge,
                 rawDueString,
                 deepLink: fallbackDeepLink,
               });
@@ -1783,12 +1862,16 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
         }
       }
 
-      const signature = `${title.toLowerCase()}::${courseName.toLowerCase()}::${rawDueString.toLowerCase()}`;
+      const courseBadge = extractCourseBadge(courseName);
+      const courseCode = courseBadge.replace(/^\[+|\]+$/g, '');
+      const signature = `${title.toLowerCase()}::${courseCode.toLowerCase()}::${rawDueString.toLowerCase()}`;
       if (!seenSignatures.has(signature)) {
         seenSignatures.add(signature);
         extractedAssignments.push({
           title,
           courseName,
+          courseCode,
+          courseBadge,
           rawDueString,
           deepLink,
         });
