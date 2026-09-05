@@ -1479,85 +1479,61 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
     /**
      * Helper: Extract React props (classId and assignmentId) from assignment card DOM node
      */
-    function getAssignmentFiberData(cardEl) {
+    function getAssignmentFiberDetails(card) {
       try {
-        const fiberKey = Object.keys(cardEl).find(
+        const fiberKey = Object.keys(card).find(
           (k) => k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance')
         );
-        if (fiberKey) {
-          let cur = cardEl[fiberKey];
-          while (cur) {
-            const p = cur.memoizedProps;
-            if (p) {
-              const candidate = p.assignment || p.item || p.cardData || p;
-              if (candidate && (candidate.classId || candidate.courseId)) {
-                const classId = candidate.classId || candidate.courseId || candidate.classDetails?.id;
-                const assignmentId = candidate.id || cardEl.id;
-                if (classId && assignmentId) {
-                  return {
-                    classId,
-                    assignmentId,
-                    deepLink: `https://assignments.edu.cloud.microsoft/classes/${classId}/assignments/${assignmentId}?returnPath=%2Fclasses%2Fall%2Flist`,
-                  };
-                }
-              }
-            }
-            cur = cur.return;
+        if (!fiberKey) {
+          // Check if stamped by edu_fiber.js page-context extractor
+          const stampedDeepLink =
+            card.getAttribute?.('data-hark-fiber-deeplink') || card.dataset?.harkFiberDeeplink;
+          if (stampedDeepLink) {
+            return {
+              classId: card.getAttribute?.('data-hark-class-id') || card.dataset?.harkClassId || '',
+              assignmentId:
+                card.getAttribute?.('data-hark-assignment-id') || card.dataset?.harkAssignmentId || '',
+              deepLink: stampedDeepLink,
+            };
           }
+          // Check child element if card itself doesn't directly expose the fiber key
+          const childWithFiber = card.querySelector && card.querySelector('*');
+          if (childWithFiber) {
+            return getAssignmentFiberDetails(childWithFiber);
+          }
+          return null;
         }
-
-        // Check if stamped by edu_fiber.js page-context extractor
-        const stampedDeepLink =
-          cardEl.getAttribute('data-hark-fiber-deeplink') || cardEl.dataset?.harkFiberDeeplink;
-        if (stampedDeepLink) {
-          return {
-            classId: cardEl.getAttribute('data-hark-class-id') || cardEl.dataset?.harkClassId || '',
-            assignmentId:
-              cardEl.getAttribute('data-hark-assignment-id') || cardEl.dataset?.harkAssignmentId || '',
-            deepLink: stampedDeepLink,
-          };
-        }
-
-        // Check child element if cardEl itself doesn't directly expose the fiber key
-        const childWithFiber = cardEl.querySelector && cardEl.querySelector('*');
-        if (childWithFiber) {
-          const childFiberKey = Object.keys(childWithFiber).find(
-            (k) => k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance')
-          );
-          if (childFiberKey) {
-            let cur = childWithFiber[childFiberKey];
-            while (cur) {
-              const p = cur.memoizedProps;
-              if (p) {
-                const candidate = p.assignment || p.item || p.cardData || p;
-                if (candidate && (candidate.classId || candidate.courseId)) {
-                  const classId = candidate.classId || candidate.courseId || candidate.classDetails?.id;
-                  const assignmentId = candidate.id || cardEl.id;
-                  if (classId && assignmentId) {
-                    return {
-                      classId,
-                      assignmentId,
-                      deepLink: `https://assignments.edu.cloud.microsoft/classes/${classId}/assignments/${assignmentId}?returnPath=%2Fclasses%2Fall%2Flist`,
-                    };
-                  }
-                }
-              }
-              cur = cur.return;
+        let cur = card[fiberKey];
+        while (cur) {
+          const p = cur.memoizedProps;
+          const candidate = p?.assignment || p?.item || p?.cardData || p;
+          if (candidate && (candidate.classId || candidate.courseId)) {
+            const classId = candidate.classId || candidate.courseId;
+            const assignmentId = candidate.id || card.id;
+            if (classId && assignmentId) {
+              return {
+                classId,
+                assignmentId,
+                deepLink: `https://assignments.edu.cloud.microsoft/classes/${classId}/assignments/${assignmentId}?returnPath=%2Fclasses%2Fall%2Flist`,
+              };
             }
           }
+          cur = cur.return;
         }
-      } catch (err) {
-        console.warn('[Hark] Fiber extraction error:', err);
+      } catch (e) {
+        console.warn('[Hark] Fiber extraction failed:', e);
       }
       return null;
     }
+
+    const getAssignmentFiberData = getAssignmentFiberDetails;
 
     // Helper: Target specific deep link for an assignment row/card element
     function extractEduCardDeepLink(cardElement) {
       if (!cardElement) return null;
 
       // 0. Primary: Fiber Data Extractor
-      const fiberData = getAssignmentFiberData(cardElement);
+      const fiberData = getAssignmentFiberDetails(cardElement);
       if (fiberData?.deepLink) {
         return fiberData.deepLink;
       }
@@ -1800,11 +1776,10 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
       const rawDueString = buildExplicitDueString(activeDateHeader, timeString, title);
 
       // Deep link resolution targeting specific assignment view
-      let deepLink = extractEduCardDeepLink(card);
+      const fiberDetails = getAssignmentFiberDetails(card);
+      let deepLink = fiberDetails?.deepLink || extractEduCardDeepLink(card);
       if (!deepLink || deepLink.endsWith('/classes/all/list')) {
-        deepLink = `https://teams.microsoft.com/l/entity/2a84b049-50bc-4535-a646-5677a8207868/assignments?context=${encodeURIComponent(
-          JSON.stringify({ title, course: courseCode })
-        )}`;
+        deepLink = window.location.href;
       }
 
       const signature = `${title.toLowerCase()}::${courseCode.toLowerCase()}::${rawDueString.toLowerCase()}`;
@@ -1904,10 +1879,16 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
             // Attempt to find element matching titleLine to extract specific deepLink
             let deepLink = null;
             try {
-              const allCandidateEls = listRoot.querySelectorAll('a, [role="row"], [role="listitem"], [data-tid*="assignment"], h2, h3, h4, strong, div[data-is-focusable="true"]');
+              const allCandidateEls = listRoot.querySelectorAll(
+                'div[data-test="assignment-card"], [data-test="assignment-card"], a, [role="row"], [role="listitem"], [data-tid*="assignment"], h2, h3, h4, strong, div[data-is-focusable="true"]'
+              );
               for (const candidateEl of allCandidateEls) {
                 if (candidateEl.textContent && candidateEl.textContent.includes(titleLine)) {
-                  deepLink = extractEduCardDeepLink(candidateEl.closest('a, [role="row"], [role="listitem"], [data-tid*="assignment"]') || candidateEl);
+                  const cardTarget =
+                    candidateEl.closest(
+                      'div[data-test="assignment-card"], [data-test="assignment-card"], a, [role="row"], [role="listitem"], [data-tid*="assignment"]'
+                    ) || candidateEl;
+                  deepLink = getAssignmentFiberDetails(cardTarget)?.deepLink || extractEduCardDeepLink(cardTarget);
                   if (deepLink && !deepLink.endsWith('/classes/all/list')) break;
                 }
               }
@@ -1916,9 +1897,7 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
             }
 
             if (!deepLink || deepLink.endsWith('/classes/all/list')) {
-              deepLink = `https://teams.microsoft.com/l/entity/2a84b049-50bc-4535-a646-5677a8207868/assignments?context=${encodeURIComponent(
-                JSON.stringify({ title: titleLine, course: courseCode })
-              )}`;
+              deepLink = window.location.href;
             }
 
             const signature = `${titleLine.toLowerCase()}::${courseCode.toLowerCase()}::${rawDueString.toLowerCase()}`;
