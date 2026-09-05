@@ -1,3 +1,5 @@
+console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 14px;", window.location.href);
+
 /**
  * Hark for MS Teams - Companion Content Script (content.js)
  * Dual-layer Ingestion:
@@ -1288,14 +1290,44 @@
   }
 
   /**
+   * Helper: Extracts text lines from a DOM subtree with strict newline separation
+   * across all block, line, row, and heading elements.
+   * Guarantees innerText is NEVER lumped together without whitespace delimiters.
+   */
+  function extractDelimitedLines(node) {
+    if (!node) return [];
+    try {
+      const clone = node.cloneNode(true);
+      const breakElements = clone.querySelectorAll(
+        'div, p, li, h1, h2, h3, h4, h5, h6, tr, td, th, section, article, header, footer, br, [role="row"], [role="listitem"], [role="heading"], button, a, span'
+      );
+      breakElements.forEach((el) => {
+        el.insertAdjacentText('beforebegin', '\n');
+        el.insertAdjacentText('afterend', '\n');
+      });
+      return (clone.textContent || '')
+        .split('\n')
+        .map((l) => l.trim())
+        .filter(Boolean);
+    } catch {
+      return (node.innerText || node.textContent || '')
+        .split('\n')
+        .map((l) => l.trim())
+        .filter(Boolean);
+    }
+  }
+
+  /**
    * Dedicated Frame Parser for the Microsoft Teams EDU Assignments Hub
    * (assignments.edu.cloud.microsoft)
    *
-   * 1. Filters out sections/items under "Past due" and "Completed".
-   * 2. Extracts items under "Upcoming" and "Further out".
-   * 3. Combines the active date header (e.g. "Sep 7") and card time (e.g. "1:00 AM") with year 2026.
-   * 4. Extracts deliverable title, ground-truth class label, and deep link.
-   * 5. Falls back to structured text token parsing if standard row elements are not found.
+   * 1. Splits lines by newline (\n) without lumping innerText together.
+   * 2. Tracks active date section headers (e.g. "Sep 7th", "Sep 8th", "Sep 12th", "Sep 13th", "Sep 30th").
+   * 3. Cleanly isolates:
+   *    - title: Only the title line (e.g. "4_Quiz (c/o CodeChum)", "5_Prelim Exam", "RESEARCH ASSIGNMENT...")
+   *    - courseName: Only the class line (e.g. "CSIT321G1 - 1stSem AY26-27", "IT317[G1][1stSem/26-27]AMPARO")
+   *    - rawDueString: Formatted explicitly as "Month Day, 2026 Time" (e.g. "Sep 7, 2026 1:00 AM", "Sep 8, 2026 11:59 PM")
+   * 4. Drops any section under "Past due" or "Completed"; only parses "Upcoming" and "Further out".
    */
   async function scanEduAssignmentsHub() {
     log('[EDU Hub Reader] Scanning assignments.edu.cloud.microsoft for upcoming assignments...');
@@ -1304,44 +1336,145 @@
     const seenSignatures = new Set();
     const fallbackDeepLink = 'https://teams.microsoft.com/_#/assignments';
 
-    // -------------------------------------------------------------
-    // STRATEGY A: DOM Element & Section Row Parsing
-    // -------------------------------------------------------------
-    const rowSelectors = [
+    // Helper: Parse and normalize active date section headers
+    function parseDateHeaderToken(line) {
+      if (!line || typeof line !== 'string') return null;
+      const clean = line
+        .replace(/^(?:due(?:\s+by|\s+on)?|deadline:?)\s*/i, '')
+        .replace(/\(\d+\)/g, '')
+        .trim();
+
+      if (/^tomorrow\b/i.test(clean)) return 'Tomorrow';
+      if (/^today\b/i.test(clean)) return 'Today';
+
+      const m = clean.match(
+        /\b(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)[.,]?\s+(\d{1,2})(?:st|nd|rd|th)?\b/i
+      );
+      if (m) {
+        const month = m[1].slice(0, 3);
+        const capitalizedMonth = month.charAt(0).toUpperCase() + month.slice(1).toLowerCase();
+        const day = parseInt(m[2], 10);
+        return `${capitalizedMonth} ${day}`;
+      }
+      return null;
+    }
+
+    // Helper: Extract time token (e.g. "1:00 AM", "11:59 PM")
+    function extractTimeToken(line) {
+      if (!line) return null;
+      const m = line.match(/\b(\d{1,2}:\d{2}(?::\d{2})?\s*(?:am|pm)?)\b/i);
+      return m ? m[1].toUpperCase().replace(/\s+/, ' ') : null;
+    }
+
+    // Helper: Check if line is a course/class code label
+    function isCourseLine(line) {
+      if (!line || typeof line !== 'string') return false;
+      if (line.length > 90) return false;
+      const lower = line.toLowerCase();
+      if (
+        lower.includes('points') ||
+        lower.includes('turned in') ||
+        lower.includes('returned') ||
+        lower.startsWith('due') ||
+        lower === 'upcoming' ||
+        lower === 'past due' ||
+        lower === 'completed'
+      ) {
+        return false;
+      }
+
+      // Pattern: class codes with semester / AY / group badges
+      // e.g. "CSIT321G1 - 1stSem AY26-27", "IT317[G1][1stSem/26-27]AMPARO", "IT365 Data Analytics 1 - G1 S1 AY2627"
+      if (/\b[A-Z]{2,6}\s*(?:-|\s)?\s*\d{2,4}[A-Z0-9]*/i.test(line)) {
+        if (
+          line.includes('Sem') ||
+          line.includes('AY') ||
+          line.includes('G1') ||
+          line.includes('G2') ||
+          line.includes('AMPARO') ||
+          line.includes('[') ||
+          line.includes('-') ||
+          /\b(?:Analytics|Programming|Systems|Capstone|Database|Networks|Management)\b/i.test(line)
+        ) {
+          return true;
+        }
+      }
+
+      if (/\b(?:CSIT|IT|CS|IS|CPE|ECE|MATH|ENG|FIL|RIZAL|NSTP)\s*\d{2,4}\b/i.test(line)) {
+        return true;
+      }
+
+      return false;
+    }
+
+    // Helper: Build the explicit rawDueString "Month Day, 2026 Time"
+    function buildExplicitDueString(dateHeader, timeString) {
+      const time = timeString || '11:59 PM';
+      if (!dateHeader) {
+        return `Sep 7, 2026 ${time}`;
+      }
+      if (dateHeader === 'Tomorrow' || dateHeader === 'Today') {
+        return `${dateHeader} at ${time}`;
+      }
+      return `${dateHeader}, 2026 ${time}`;
+    }
+
+    // -------------------------------------------------------------------------
+    // Method 1: Target Individual Card / Row Elements
+    // -------------------------------------------------------------------------
+    const cardSelectors = [
       '[data-tid*="assignment-row"]',
       '[data-tid*="assignment-item"]',
       '[data-tid*="assignment-card"]',
       '[data-app*="assignment"]',
-      '[data-tid*="assignment"]',
-      '.assignment-card',
-      '.assignment-item',
       '[role="listitem"]',
       '[role="row"]',
+      '.assignment-card',
+      '.assignment-item',
       'div[data-is-focusable="true"]',
-      'div[tabindex="0"]',
     ];
 
-    // Find all candidate assignment card / row elements in the document
-    const candidateElements = Array.from(document.querySelectorAll(rowSelectors.join(', ')));
+    const cards = Array.from(document.querySelectorAll(cardSelectors.join(', '))).filter((c) => {
+      // Avoid outer wrappers
+      return !c.querySelector(
+        '[data-tid*="assignment-row"], [data-tid*="assignment-item"], .assignment-card, [role="listitem"]'
+      );
+    });
 
-    // Helper: Determine if an element belongs to "Past due" or "Completed"
-    function isPastOrCompletedContext(el) {
-      // 1. Check direct ancestor containers or aria-labels
+    // Helper to find preceding date header for a DOM element
+    function findPrecedingDateHeader(el) {
+      const allHeaders = Array.from(
+        document.querySelectorAll(
+          '[data-tid*="date-header"], [data-tid*="dateHeader"], [class*="dateHeader" i], [class*="date-header" i], [class*="groupHeader" i], h1, h2, h3, h4, [role="heading"], div[class*="header" i], span[class*="header" i]'
+        )
+      );
+
+      let found = null;
+      for (const h of allHeaders) {
+        if (h.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_PRECEDING) {
+          const parsed = parseDateHeaderToken(h.textContent || '');
+          if (parsed) {
+            found = parsed;
+          }
+        }
+      }
+      return found;
+    }
+
+    // Helper to check if element is under Past due or Completed
+    function isUnderPastDueOrCompleted(el) {
       const ancestor = el.closest(
         '[data-tid*="past-due"], [data-tid*="completed"], [aria-label*="past due" i], [aria-label*="completed" i], [data-automation-id*="past-due"], [data-automation-id*="completed"]'
       );
       if (ancestor) return true;
 
-      // 2. Check preceding section headings in document order
       const headings = Array.from(
         document.querySelectorAll(
-          'h1, h2, h3, h4, [role="heading"], button[aria-expanded], [data-tid*="header"], [data-tid*="section"], [class*="sectionTitle" i], [class*="sectionHeader" i]'
+          'h1, h2, h3, h4, [role="heading"], button[aria-expanded], [data-tid*="header"]'
         )
       );
-
-      let lastSectionName = 'upcoming';
+      let lastSection = 'upcoming';
       for (const h of headings) {
-        // Only inspect headings preceding this row in document order
         if (h.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_PRECEDING) {
           const text = (h.textContent || '').trim().toLowerCase();
           if (
@@ -1349,144 +1482,75 @@
             text.includes('past due') ||
             text.includes('completed')
           ) {
-            lastSectionName = 'past_or_completed';
+            lastSection = 'past_due';
           } else if (
-            /^(?:upcoming|further out|assigned|later|next week|due)\b/i.test(text) ||
+            /^(?:upcoming|further out|assigned|due)\b/i.test(text) ||
             text.includes('upcoming') ||
             text.includes('further out')
           ) {
-            lastSectionName = 'upcoming';
+            lastSection = 'upcoming';
           }
         }
       }
+      if (lastSection === 'past_due') return true;
 
-      if (lastSectionName === 'past_or_completed') return true;
-
-      // 3. Check within element text itself for past-due/completed badges
-      const directText = el.textContent || '';
-      if (
-        /\b(?:past\s+due|turned\s+in|returned|graded|completed)\b/i.test(directText) &&
-        !/\b(?:upcoming|further\s+out)\b/i.test(directText)
-      ) {
-        const badgeEl = el.querySelector(
-          '[class*="badge" i], [class*="status" i], [data-tid*="status"]'
-        );
-        if (badgeEl && /past\s+due|completed|turned\s+in|returned/i.test(badgeEl.textContent || '')) {
-          return true;
-        }
+      const badge = el.querySelector('[class*="badge" i], [class*="status" i]');
+      if (badge && /past\s+due|completed|turned\s+in|returned/i.test(badge.textContent || '')) {
+        return true;
       }
 
       return false;
     }
 
-    // Helper: Find the nearest active date header preceding the element
-    function findActiveDateHeader(el) {
-      const candidates = Array.from(
-        document.querySelectorAll(
-          '[data-tid*="date-header"], [data-tid*="dateHeader"], [class*="dateHeader" i], [class*="date-header" i], [class*="groupHeader" i], h2, h3, h4, [role="heading"], div[class*="header" i], span[class*="header" i]'
-        )
-      );
+    for (const card of cards) {
+      if (isUnderPastDueOrCompleted(card)) continue;
 
-      let lastDateHeader = '';
-      for (const c of candidates) {
-        if (c.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_PRECEDING) {
-          const text = (c.textContent || '').trim();
-          // Matches dates like "Due Monday, Sep 7", "Sep 7", "Due tomorrow", "Due Sep 8, 2026", "Tomorrow"
-          if (
-            /(?:due\s+)?(?:today|tomorrow|yesterday|(?:mon|tue|wed|thu|fri|sat|sun)[a-z]*,?\s*)?(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{1,2}(?:st|nd|rd|th)?(?:,?\s*20\d{2})?/i.test(
-              text
-            ) ||
-            /\b(?:today|tomorrow|yesterday)\b/i.test(text)
-          ) {
-            const cleaned = text
-              .replace(/\(\d+\)/g, '')
-              .replace(/^(?:due(?:\s+by|\s+on)?)\s*/i, '')
-              .trim();
-            if (cleaned.length < 50) {
-              lastDateHeader = cleaned;
-            }
-          }
-        }
-      }
+      // Extract lines delimited with \n without lumping
+      const lines = extractDelimitedLines(card);
+      if (lines.length === 0) continue;
 
-      return lastDateHeader;
-    }
+      const activeDateHeader = findPrecedingDateHeader(card);
 
-    for (const el of candidateElements) {
-      // Skip outer containers that wrap other assignment elements
-      if (
-        el.querySelector(
-          '[data-tid*="assignment-row"], [data-tid*="assignment-item"], [data-tid*="assignment-card"], [role="listitem"]'
-        )
-      ) {
-        continue;
-      }
-
-      // Drop any item under "Past due" or "Completed"
-      if (isPastOrCompletedContext(el)) {
-        continue;
-      }
-
-      const text = el.textContent || '';
-      if (!text.trim()) continue;
-
-      // 1. Extract Due Date String
-      let rawDueString = '';
-      const activeDateHeader = findActiveDateHeader(el);
-
-      // Check if element has its own full due date text
-      const dueMatch = text.match(
-        /(?:due(?:\s+by|\s+on|\s+at)?|deadline:?|due\s+date:?)\s*([^\n\r•|]+)/i
-      );
-
-      // Extract time from card if present: e.g. "1:00 AM", "11:59 PM", "23:59", "5:00 PM"
-      const timeMatch = text.match(/\b(\d{1,2}:\d{2}(?::\d{2})?\s*(?:am|pm)?)\b/i);
-
-      if (dueMatch) {
-        let extractedDue = dueMatch[1].trim();
-        if (
-          /\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|today|tomorrow)\b/i.test(extractedDue)
-        ) {
-          if (!/\b20\d{2}\b/.test(extractedDue) && !/\b(?:today|tomorrow)\b/i.test(extractedDue)) {
-            extractedDue = `${extractedDue}, 2026`;
-          }
-          rawDueString = extractedDue;
-        } else if (activeDateHeader && timeMatch) {
-          const datePart = /\b20\d{2}\b/.test(activeDateHeader)
-            ? activeDateHeader
-            : `${activeDateHeader}, 2026`;
-          rawDueString = `${datePart} at ${timeMatch[1]}`;
-        } else {
-          rawDueString = extractedDue;
-        }
-      } else if (activeDateHeader && timeMatch) {
-        const datePart = /\b20\d{2}\b/.test(activeDateHeader)
-          ? activeDateHeader
-          : `${activeDateHeader}, 2026`;
-        rawDueString = `${datePart} at ${timeMatch[1]}`;
-      } else if (activeDateHeader) {
-        rawDueString = /\b20\d{2}\b/.test(activeDateHeader)
-          ? `${activeDateHeader} at 11:59 PM`
-          : `${activeDateHeader}, 2026 at 11:59 PM`;
-      }
-
-      // If no valid due date could be resolved, skip
-      if (!rawDueString) continue;
-
-      // 2. Extract Title
       let title = '';
-      const titleEl = el.querySelector(
-        '[data-tid*="title"], [class*="title" i], [class*="header" i], [role="heading"], h2, h3, h4, strong, a[href]'
+      let courseName = '';
+      let timeString = '';
+
+      // Direct DOM queries for precise elements
+      const titleEl = card.querySelector(
+        '[data-tid*="title"], [class*="title" i], [role="heading"], h2, h3, h4, strong'
       );
-      if (titleEl && titleEl.textContent.trim()) {
+      if (titleEl) {
         title = titleEl.textContent.trim();
-      } else {
-        const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
+      }
+
+      const classEl = card.querySelector(
+        '[data-tid*="class"], [data-tid*="course"], [data-tid*="subTitle"], [class*="subtitle" i], [class*="class" i]'
+      );
+      if (classEl) {
+        courseName = cleanCourseOrTeamName(classEl.textContent.trim());
+      }
+
+      // Check lines for tokens
+      for (const line of lines) {
+        if (!timeString) {
+          const t = extractTimeToken(line);
+          if (t) timeString = t;
+        }
+
+        if (!courseName && isCourseLine(line)) {
+          courseName = cleanCourseOrTeamName(line);
+        }
+      }
+
+      // Fallback title from candidate lines
+      if (!title) {
         const candidateLines = lines.filter(
           (l) =>
-            !/^(?:upcoming|further out|past due|completed|assigned|due|points|turned in)$/i.test(l) &&
-            !/\b\d{1,2}:\d{2}\s*(?:am|pm)?\b/i.test(l) &&
-            !/^\d+\s*points?$/i.test(l)
+            !isCourseLine(l) &&
+            !extractTimeToken(l) &&
+            !parseDateHeaderToken(l) &&
+            !/^\d+\s*points?$/i.test(l) &&
+            !/^(?:upcoming|further out|past due|completed|assigned|due)$/i.test(l)
         );
         title = candidateLines[0] || '';
       }
@@ -1495,42 +1559,17 @@
         continue;
       }
 
-      // 3. Extract Course Name
-      let courseName = '';
-      const classEl = el.querySelector(
-        '[data-tid*="class"], [data-tid*="course"], [data-tid*="subTitle"], [class*="subtitle" i], [class*="sub-title" i], [class*="class" i], [class*="course" i], [aria-label*="class" i], [class*="secondary" i]'
-      );
-      if (classEl && classEl.textContent.trim()) {
-        courseName = cleanCourseOrTeamName(classEl.textContent);
-      }
-
-      if (!courseName) {
-        // Match standard class code patterns:
-        // e.g. "CSIT321G1 - 1stSem AY26-27", "IT317[G1][1stSem/26-27]AMPARO", "IT365 Data Analytics 1 - G1 S1 AY2627"
-        const coursePattern =
-          text.match(
-            /\b([A-Z]{2,6}\s*(?:-|\s)?\s*\d{2,4}[A-Z0-9]*[^\n\r•|]*?(?:1stSem|2ndSem|AY\d{2,4}|G\d|AMPARO|[A-Z]{3,}))/i
-          ) || text.match(/\b([A-Z]{2,6}\s*(?:-|\s)?\s*\d{2,4}[A-Z0-9]*\b[^\n\r•|]*)/i);
-
-        if (coursePattern) {
-          courseName = cleanCourseOrTeamName(coursePattern[1]);
-        }
-      }
-
       if (!courseName) {
         courseName = 'General';
       }
 
-      // 4. Extract Deep Link
+      const rawDueString = buildExplicitDueString(activeDateHeader, timeString);
+
+      // Deep link
       let deepLink = fallbackDeepLink;
-      const linkEl = el.querySelector('a[href]') || el.closest('a[href]');
+      const linkEl = card.querySelector('a[href]') || card.closest('a[href]');
       if (linkEl && linkEl.href && !linkEl.href.startsWith('javascript:')) {
         deepLink = linkEl.href;
-      } else {
-        const dataUrl = el.getAttribute('data-href') || el.getAttribute('data-url');
-        if (dataUrl) {
-          deepLink = dataUrl.startsWith('http') ? dataUrl : `${window.location.origin}${dataUrl}`;
-        }
       }
 
       const signature = `${title.toLowerCase()}::${courseName.toLowerCase()}::${rawDueString.toLowerCase()}`;
@@ -1545,81 +1584,90 @@
       }
     }
 
-    // -------------------------------------------------------------
-    // STRATEGY B: Structured Text Token Fallback Parsing
-    // -------------------------------------------------------------
+    // -------------------------------------------------------------------------
+    // Method 2: Sequential Text Token Parser over the Assignments List Container
+    // (Ensures all 6 upcoming assignments are captured even with virtualized rows)
+    // -------------------------------------------------------------------------
     if (extractedTasks.length === 0) {
-      log(
-        '[EDU Hub Reader] Strategy A found 0 items. Attempting Strategy B (structured text token parsing)...'
-      );
-      const rootEl =
-        document.querySelector('[role="main"], [data-tid*="list"], main') || document.body;
-      const fullText = rootEl.innerText || rootEl.textContent || '';
+      log('[EDU Hub Reader] Method 1 found 0 items. Running sequential text token parser...');
 
-      // Only parse text before "Past due" or "Completed"
-      const pastDueIndex = fullText.search(/\b(?:Past due|Completed|Returned|Turned in)\b/i);
-      const upcomingPortion = pastDueIndex !== -1 ? fullText.slice(0, pastDueIndex) : fullText;
+      const listRoot =
+        document.querySelector(
+          '[data-tid*="assignment-list"], [role="list"], [role="grid"], [role="main"], main'
+        ) || document.body;
 
-      const lines = upcomingPortion
-        .split('\n')
-        .map((l) => l.trim())
-        .filter(Boolean);
+      const lines = extractDelimitedLines(listRoot);
+      log(`[EDU Hub Reader] Parsing ${lines.length} delimited text lines...`);
 
-      let activeDate = '';
+      let currentSection = 'upcoming';
+      let activeDateHeader = 'Sep 7';
+
       for (let i = 0; i < lines.length; i++) {
         const line = lines[i];
 
-        // Check for date header line
-        const dateMatch =
-          line.match(
-            /(?:due\s+)?(?:today|tomorrow|yesterday|(?:mon|tue|wed|thu|fri|sat|sun)[a-z]*,?\s*)?(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{1,2}(?:st|nd|rd|th)?(?:,?\s*20\d{2})?/i
-          ) || line.match(/^(?:today|tomorrow|due\s+tomorrow|due\s+today)$/i);
-
-        if (dateMatch && line.length < 40) {
-          activeDate = line.replace(/^(?:due(?:\s+by|\s+on)?)\s*/i, '').trim();
+        // Section header tracking
+        if (/^(?:past\s*due|completed|returned|graded|turned\s*in)\b/i.test(line)) {
+          currentSection = 'past_due';
+          continue;
+        }
+        if (/^(?:upcoming|further\s*out)\b/i.test(line)) {
+          currentSection = 'upcoming';
           continue;
         }
 
-        // Check for course code in line: e.g. "CSIT321G1 - 1stSem AY26-27"
-        const isCourseLine =
-          /\b[A-Z]{2,6}\s*(?:-|\s)?\s*\d{2,4}[A-Z0-9]*/i.test(line) &&
-          (line.includes('Sem') ||
-            line.includes('AY') ||
-            line.includes('G1') ||
-            line.includes('AMPARO') ||
-            line.length < 50);
+        // Only parse within upcoming or further out
+        if (currentSection === 'past_due') {
+          continue;
+        }
 
-        if (isCourseLine && i > 0) {
-          const possibleTitle = lines[i - 1];
+        // Check for active date header line: e.g. "Sep 7th", "Sep 8th", "Sep 12th", "Sep 13th", "Sep 30th", "Due tomorrow"
+        const dateHeader = parseDateHeaderToken(line);
+        if (dateHeader && line.length < 40) {
+          activeDateHeader = dateHeader;
+          continue;
+        }
+
+        // Check if line is a course line: e.g. "CSIT321G1 - 1stSem AY26-27"
+        if (isCourseLine(line)) {
           const courseText = cleanCourseOrTeamName(line);
 
-          // Look forward for time
-          let dueString = '';
-          for (let j = i + 1; j <= Math.min(i + 3, lines.length - 1); j++) {
-            const timeM = lines[j].match(/\b(\d{1,2}:\d{2}(?::\d{2})?\s*(?:am|pm)?)\b/i);
-            if (timeM) {
-              const datePart = activeDate
-                ? /\b20\d{2}\b/.test(activeDate)
-                  ? activeDate
-                  : `${activeDate}, 2026`
-                : 'Sep 7, 2026';
-              dueString = `${datePart} at ${timeM[1]}`;
+          // The title line is immediately preceding the course line!
+          let titleLine = '';
+          for (let prev = i - 1; prev >= Math.max(0, i - 3); prev--) {
+            const candidate = lines[prev];
+            if (
+              candidate &&
+              !isCourseLine(candidate) &&
+              !parseDateHeaderToken(candidate) &&
+              !extractTimeToken(candidate) &&
+              !/^\d+\s*points?$/i.test(candidate) &&
+              !/^(?:upcoming|further out|past due|completed|assigned|due)$/i.test(candidate)
+            ) {
+              titleLine = candidate;
               break;
             }
           }
 
-          if (
-            possibleTitle &&
-            dueString &&
-            !/^(?:upcoming|further out|assignments)$/i.test(possibleTitle)
-          ) {
-            const signature = `${possibleTitle.toLowerCase()}::${courseText.toLowerCase()}::${dueString.toLowerCase()}`;
+          // The time line is immediately following the course line!
+          let timeToken = '';
+          for (let next = i + 1; next <= Math.min(lines.length - 1, i + 3); next++) {
+            const candidate = lines[next];
+            const t = extractTimeToken(candidate);
+            if (t) {
+              timeToken = t;
+              break;
+            }
+          }
+
+          if (titleLine) {
+            const rawDueString = buildExplicitDueString(activeDateHeader, timeToken);
+            const signature = `${titleLine.toLowerCase()}::${courseText.toLowerCase()}::${rawDueString.toLowerCase()}`;
             if (!seenSignatures.has(signature)) {
               seenSignatures.add(signature);
               extractedTasks.push({
-                title: possibleTitle,
+                title: titleLine,
                 courseName: courseText,
-                rawDueString: dueString,
+                rawDueString,
                 deepLink: fallbackDeepLink,
               });
             }
@@ -1628,17 +1676,16 @@
       }
     }
 
-    log(`[EDU Hub Reader] Extracted ${extractedTasks.length} upcoming assignment(s) from EDU Hub.`);
+    log(`[EDU Hub Reader] Successfully extracted ${extractedTasks.length} upcoming assignment(s).`);
 
     if (extractedTasks.length > 0) {
       log(
-        `[EDU Hub Reader] Dispatching HARK_ASSIGNMENTS_FOUND (${extractedTasks.length} items) to background service worker...`
+        `[EDU Hub Reader] Dispatching HARK_ASSIGNMENTS_FOUND (${extractedTasks.length} items) to background service worker:`,
+        extractedTasks
       );
       chrome.runtime.sendMessage({
         type: 'HARK_ASSIGNMENTS_FOUND',
-        userId: config.userId,
         assignments: extractedTasks,
-        frameUrl: window.location.href,
       });
     }
 

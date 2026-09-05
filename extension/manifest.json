@@ -9,12 +9,11 @@
   ],
   "host_permissions": [
     "https://teams.microsoft.com/*",
-    "https://assignments.edu.cloud.microsoft/*",
-    "https://*.assignments.edu.cloud.microsoft/*",
     "https://*.assignments.onenote.com/*",
     "https://*.assignments.microsoft.com/*",
-    "http://localhost:3000/*",
-    "https://*/*"
+    "https://assignments.edu.cloud.microsoft/*",
+    "https://*.assignments.edu.cloud.microsoft/*",
+    "http://localhost:3000/*"
   ],
   "background": {
     "service_worker": "background.js"
@@ -35,15 +34,17 @@
     {
       "matches": [
         "https://teams.microsoft.com/*",
-        "https://assignments.edu.cloud.microsoft/*",
-        "https://*.assignments.edu.cloud.microsoft/*",
         "https://*.assignments.onenote.com/*",
-        "https://*.assignments.microsoft.com/*"
+        "https://*.assignments.microsoft.com/*",
+        "https://assignments.edu.cloud.microsoft/*",
+        "https://*.assignments.edu.cloud.microsoft/*"
       ],
       "js": [
         "content.js"
       ],
       "all_frames": true,
+      "match_about_blank": true,
+      "match_origin_as_fallback": true,
       "run_at": "document_idle"
     }
   ],

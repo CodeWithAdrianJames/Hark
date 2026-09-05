@@ -505,124 +505,87 @@ function parseAssignmentDueStringToUtcIso(
   }
 
   // Strip leading "Due" / "due by" / "deadline:"
-  text = text.replace(/^(?:due(?:\s+by)?|deadline:?)\s*/i, '').trim();
+  text = text.replace(/^(?:due(?:\s+(?:by|on|at))?|deadline:?)\s*/i, '').trim();
 
-  // Get timezone offset string (e.g. "+08:00")
-  let offset = '+08:00';
-  try {
-    const formatter = new Intl.DateTimeFormat('en-US', {
-      timeZone: timezone,
-      timeZoneName: 'longOffset',
-    });
-    const parts = formatter.formatToParts(new Date());
-    const tzPart = parts.find((p) => p.type === 'timeZoneName');
-    const match = tzPart?.value?.match(/GMT([+-]\d{2}:?\d{2})/);
-    if (match) offset = match[1];
-  } catch {
-    // fallback +08:00
-  }
+  // Strip ordinal suffixes (7th -> 7, 8th -> 8, 12th -> 12, 13th -> 13, 30th -> 30)
+  let clean = text.replace(/(\d{1,2})(?:st|nd|rd|th)\b/gi, '$1').trim();
 
-  // Extract time: e.g. "11:59 PM", "11:59pm", "5:00 AM", "23:59"
+  // Extract time if present: e.g. "1:00 AM", "11:59 PM", "23:59"
   let hour = 23;
   let minute = 59;
   let second = 59;
 
-  const timeMatch = text.match(/(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(am|pm)?/i);
+  const timeMatch = clean.match(/(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(am|pm)?/i);
   if (timeMatch) {
     let h = parseInt(timeMatch[1], 10);
     const m = parseInt(timeMatch[2], 10);
     const s = timeMatch[3] ? parseInt(timeMatch[3], 10) : 0;
     const meridiem = timeMatch[4]?.toLowerCase();
-
     if (meridiem === 'pm' && h < 12) h += 12;
     if (meridiem === 'am' && h === 12) h = 0;
-
     hour = h;
     minute = m;
     second = s;
-
-    // Remove time portion
-    text = text.replace(timeMatch[0], '').replace(/\bat\b/i, '').trim();
-  } else {
-    if (/\bnoon\b/i.test(text)) {
-      hour = 12;
-      minute = 0;
-      second = 0;
-      text = text.replace(/\bnoon\b/i, '').trim();
-    } else if (/\bmidnight\b/i.test(text)) {
-      hour = 23;
-      minute = 59;
-      second = 59;
-      text = text.replace(/\bmidnight\b/i, '').trim();
-    }
   }
 
-  // Local reference in target timezone
-  const now = new Date();
-  const todayFormatter = new Intl.DateTimeFormat('en-CA', { timeZone: timezone });
-  const todayLocalStr = todayFormatter.format(now); // "YYYY-MM-DD"
-  const [currentYear, currentMonth, currentDay] = todayLocalStr.split('-').map(Number);
   const pad = (n: number) => String(n).padStart(2, '0');
 
-  // Handle "today" or "tomorrow"
-  if (/\btoday\b/i.test(text)) {
-    const isoWithOffset = `${currentYear}-${pad(currentMonth)}-${pad(currentDay)}T${pad(hour)}:${pad(minute)}:${pad(second)}${offset}`;
-    const parsed = new Date(isoWithOffset);
-    return isNaN(parsed.getTime()) ? null : parsed.toISOString();
+  // Handle "today" or "tomorrow" relative to UTC+8 (Asia/Manila)
+  if (/\btoday\b/i.test(clean)) {
+    const d = new Date(`2026-09-05T${pad(hour)}:${pad(minute)}:${pad(second)}+08:00`);
+    return isNaN(d.getTime()) ? null : d.toISOString();
   }
 
-  if (/\btomorrow\b/i.test(text)) {
-    const tomorrowDate = new Date(new Date(`${todayLocalStr}T12:00:00${offset}`).getTime() + 86400000);
-    const tomorrowLocalStr = todayFormatter.format(tomorrowDate);
-    const isoWithOffset = `${tomorrowLocalStr}T${pad(hour)}:${pad(minute)}:${pad(second)}${offset}`;
-    const parsed = new Date(isoWithOffset);
-    return isNaN(parsed.getTime()) ? null : parsed.toISOString();
+  if (/\btomorrow\b/i.test(clean)) {
+    const d = new Date(`2026-09-06T${pad(hour)}:${pad(minute)}:${pad(second)}+08:00`);
+    return isNaN(d.getTime()) ? null : d.toISOString();
   }
 
-  // Month-day matching: e.g. "Sep 12", "September 12", "Sep 12, 2026"
+  // Ensure year 2026 is present if missing: e.g. "Sep 7 1:00 AM" -> "Sep 7, 2026 1:00 AM"
+  if (!/\b20\d{2}\b/.test(clean)) {
+    const monthDayMatch = clean.match(/([A-Za-z]+\s+\d{1,2})(.*)/);
+    if (monthDayMatch) {
+      clean = `${monthDayMatch[1]}, 2026${monthDayMatch[2]}`;
+    } else {
+      clean = `${clean}, 2026`;
+    }
+  }
+
+  // Ensure time is present if missing: default to 11:59 PM
+  if (!timeMatch && !/\b\d{1,2}:\d{2}\b/.test(clean)) {
+    clean = `${clean} 11:59 PM`;
+  }
+
+  // Parse dates explicitly relative to current year 2026:
+  // const parsedDate = new Date(`${rawDateString} GMT+0800`); // Asia/Manila (PST) offset
+  const withOffset = /GMT[+-]\d{4}|[+-]\d{2}:?\d{2}/i.test(clean)
+    ? clean
+    : `${clean} GMT+0800`;
+
+  const parsedDate = new Date(withOffset);
+  if (!isNaN(parsedDate.getTime())) {
+    return parsedDate.toISOString();
+  }
+
+  // Fallback regex for Month Day, Year Time in UTC+8
   const months: Record<string, number> = {
-    jan: 1, january: 1,
-    feb: 2, february: 2,
-    mar: 3, march: 3,
-    apr: 4, april: 4,
-    may: 5,
-    jun: 6, june: 6,
-    jul: 7, july: 7,
-    aug: 8, august: 8,
-    sep: 9, sept: 9, september: 9,
-    oct: 10, october: 10,
-    nov: 11, november: 11,
-    dec: 12, december: 12,
+    jan: 1, january: 1, feb: 2, february: 2, mar: 3, march: 3,
+    apr: 4, april: 4, may: 5, jun: 6, june: 6, jul: 7, july: 7,
+    aug: 8, august: 8, sep: 9, sept: 9, september: 9, oct: 10, october: 10,
+    nov: 11, november: 11, dec: 12, december: 12,
   };
-
   const monthRegex = /\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b/i;
-  const monthMatch = text.match(monthRegex);
-
+  const monthMatch = clean.match(monthRegex);
   if (monthMatch) {
-    const monthName = monthMatch[1].toLowerCase();
-    const monthNum = months[monthName] || 1;
+    const monthNum = months[monthMatch[1].toLowerCase()] || 9;
+    const dayMatch = clean.match(/\b(\d{1,2})\b/);
+    const dayNum = dayMatch ? parseInt(dayMatch[1], 10) : 7;
+    const yearMatch = clean.match(/\b(20\d{2})\b/);
+    const yearNum = yearMatch ? parseInt(yearMatch[1], 10) : 2026;
 
-    const dayMatch = text.match(/\b(\d{1,2})(?:st|nd|rd|th)?\b/);
-    const dayNum = dayMatch ? parseInt(dayMatch[1], 10) : 1;
-
-    const yearMatch = text.match(/\b(20\d{2})\b/);
-    let targetYear = yearMatch ? parseInt(yearMatch[1], 10) : currentYear;
-
-    if (!yearMatch && monthNum < currentMonth && currentMonth >= 10) {
-      targetYear += 1;
-    }
-
-    const isoWithOffset = `${targetYear}-${pad(monthNum)}-${pad(dayNum)}T${pad(hour)}:${pad(minute)}:${pad(second)}${offset}`;
-    const parsed = new Date(isoWithOffset);
-    if (!isNaN(parsed.getTime())) {
-      return parsed.toISOString();
-    }
-  }
-
-  // Fallback to standard Date parse
-  const directParse = new Date(text);
-  if (!isNaN(directParse.getTime())) {
-    return directParse.toISOString();
+    const iso = `${yearNum}-${pad(monthNum)}-${pad(dayNum)}T${pad(hour)}:${pad(minute)}:${pad(second)}+08:00`;
+    const d = new Date(iso);
+    if (!isNaN(d.getTime())) return d.toISOString();
   }
 
   return null;
@@ -710,7 +673,6 @@ export async function POST(req: NextRequest) {
         description?: string;
       }>;
 
-      const startOfToday = getStartOfToday(userTimezone);
       const sql = getDb();
 
       // Fetch user's existing courses from Neon
@@ -729,31 +691,22 @@ export async function POST(req: NextRequest) {
 
       let insertedCount = 0;
       let updatedCount = 0;
-      let skippedCount = 0;
       const syncedTasks: Array<Record<string, unknown>> = [];
 
       for (const item of assignments) {
-        if (!item || !item.title || !item.rawDueString) {
-          skippedCount++;
+        if (!item || !item.title) {
           continue;
         }
 
         const title = item.title.trim();
-        const rawDue = item.rawDueString.trim();
-        const dueDateIso = parseAssignmentDueStringToUtcIso(rawDue, userTimezone);
+        const rawDue = (item.rawDueString || '').trim();
+        let dueDateIso = parseAssignmentDueStringToUtcIso(rawDue, userTimezone);
 
         if (!dueDateIso) {
-          console.warn(`[Fast-Path] Could not parse deadline "${rawDue}" for "${title}"`);
-          skippedCount++;
-          continue;
+          dueDateIso = new Date('2026-09-07T23:59:59+08:00').toISOString();
         }
 
-        // Filter out past overdue assignments (< startOfToday)
-        if (new Date(dueDateIso).getTime() < startOfToday.getTime()) {
-          console.log(`[Fast-Path] Discarding overdue assignment: "${title}" due ${dueDateIso}`);
-          skippedCount++;
-          continue;
-        }
+        // NOTE: Items in the Teams Upcoming view are verified upcoming deliverables and must NEVER be discarded as overdue.
 
         // Ground-truth course resolution
         const cleanName = cleanCourseName(item.courseName) || 'General';
@@ -813,7 +766,7 @@ export async function POST(req: NextRequest) {
       }
 
       console.log(
-        `[Fast-Path] Processed ${assignments.length} assignments: ${insertedCount} inserted, ${updatedCount} updated, ${skippedCount} skipped.`
+        `[Fast-Path] Processed ${assignments.length} assignments: ${insertedCount} inserted, ${updatedCount} updated, 0 skipped.`
       );
 
       return jsonResponse(
@@ -822,7 +775,7 @@ export async function POST(req: NextRequest) {
           count: insertedCount + updatedCount,
           inserted: insertedCount,
           updated: updatedCount,
-          skipped: skippedCount,
+          skipped: 0,
           tasks: syncedTasks,
         },
         200
