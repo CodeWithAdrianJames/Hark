@@ -19,11 +19,23 @@
     'color: #f87171; font-weight: bold; background: #0f172a; padding: 2px 6px; border-radius: 3px;';
 
   const isTopWindow = window.self === window.top;
-  console.log(
-    '%c[Hark Frame]',
-    'color: #ffaa00; font-weight: bold; font-size: 11px; padding: 2px 4px; border-radius: 2px;',
-    isTopWindow ? 'Top Teams Window' : `Assignments Iframe (${window.location.host})`
-  );
+  const isEduAssignmentsHost =
+    typeof window !== 'undefined' &&
+    window.location.hostname.includes('assignments.edu.cloud.microsoft');
+
+  if (isEduAssignmentsHost) {
+    console.log(
+      '%c[Hark Frame: EDU Hub]',
+      'color: #10b981; font-weight: bold; font-size: 11px; padding: 2px 4px; border-radius: 2px; background: #064e3b;',
+      `Assignments EDU Hub (${window.location.host})`
+    );
+  } else {
+    console.log(
+      '%c[Hark Frame]',
+      'color: #ffaa00; font-weight: bold; font-size: 11px; padding: 2px 4px; border-radius: 2px;',
+      isTopWindow ? 'Top Teams Window' : `Assignments Iframe (${window.location.host})`
+    );
+  }
 
   function log(msg, ...args) {
     console.log(`%c[Hark Extension]%c ${msg}`, LOG_STYLE, 'color: inherit;', ...args);
@@ -1230,8 +1242,28 @@
               sendResponse({ status: 'TOP_FRAME_NAVIGATED', error: err.message });
             });
           return true;
+        } else if (isEduAssignmentsHost) {
+          // Frame 2A: Inside EDU Assignments Hub iframe (assignments.edu.cloud.microsoft)
+          scanEduAssignmentsHub()
+            .then((extracted) => {
+              sendResponse({
+                status: 'SUCCESS',
+                frame: 'edu_hub',
+                count: extracted.length,
+              });
+            })
+            .catch((err) => {
+              logError('[EDU Hub Frame] Failed to extract assignments:', err);
+              sendResponse({
+                status: 'ERROR',
+                frame: 'edu_hub',
+                error: err.message,
+                count: 0,
+              });
+            });
+          return true;
         } else {
-          // Frame 2: Inside Assignments Iframe
+          // Frame 2B: Inside Generic Assignments Iframe
           scanIframeAssignments()
             .then((extracted) => {
               sendResponse({
@@ -1253,6 +1285,364 @@
         }
       }
     });
+  }
+
+  /**
+   * Dedicated Frame Parser for the Microsoft Teams EDU Assignments Hub
+   * (assignments.edu.cloud.microsoft)
+   *
+   * 1. Filters out sections/items under "Past due" and "Completed".
+   * 2. Extracts items under "Upcoming" and "Further out".
+   * 3. Combines the active date header (e.g. "Sep 7") and card time (e.g. "1:00 AM") with year 2026.
+   * 4. Extracts deliverable title, ground-truth class label, and deep link.
+   * 5. Falls back to structured text token parsing if standard row elements are not found.
+   */
+  async function scanEduAssignmentsHub() {
+    log('[EDU Hub Reader] Scanning assignments.edu.cloud.microsoft for upcoming assignments...');
+
+    const extractedTasks = [];
+    const seenSignatures = new Set();
+    const fallbackDeepLink = 'https://teams.microsoft.com/_#/assignments';
+
+    // -------------------------------------------------------------
+    // STRATEGY A: DOM Element & Section Row Parsing
+    // -------------------------------------------------------------
+    const rowSelectors = [
+      '[data-tid*="assignment-row"]',
+      '[data-tid*="assignment-item"]',
+      '[data-tid*="assignment-card"]',
+      '[data-app*="assignment"]',
+      '[data-tid*="assignment"]',
+      '.assignment-card',
+      '.assignment-item',
+      '[role="listitem"]',
+      '[role="row"]',
+      'div[data-is-focusable="true"]',
+      'div[tabindex="0"]',
+    ];
+
+    // Find all candidate assignment card / row elements in the document
+    const candidateElements = Array.from(document.querySelectorAll(rowSelectors.join(', ')));
+
+    // Helper: Determine if an element belongs to "Past due" or "Completed"
+    function isPastOrCompletedContext(el) {
+      // 1. Check direct ancestor containers or aria-labels
+      const ancestor = el.closest(
+        '[data-tid*="past-due"], [data-tid*="completed"], [aria-label*="past due" i], [aria-label*="completed" i], [data-automation-id*="past-due"], [data-automation-id*="completed"]'
+      );
+      if (ancestor) return true;
+
+      // 2. Check preceding section headings in document order
+      const headings = Array.from(
+        document.querySelectorAll(
+          'h1, h2, h3, h4, [role="heading"], button[aria-expanded], [data-tid*="header"], [data-tid*="section"], [class*="sectionTitle" i], [class*="sectionHeader" i]'
+        )
+      );
+
+      let lastSectionName = 'upcoming';
+      for (const h of headings) {
+        // Only inspect headings preceding this row in document order
+        if (h.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_PRECEDING) {
+          const text = (h.textContent || '').trim().toLowerCase();
+          if (
+            /^(?:past due|completed|returned|graded|turned in)\b/i.test(text) ||
+            text.includes('past due') ||
+            text.includes('completed')
+          ) {
+            lastSectionName = 'past_or_completed';
+          } else if (
+            /^(?:upcoming|further out|assigned|later|next week|due)\b/i.test(text) ||
+            text.includes('upcoming') ||
+            text.includes('further out')
+          ) {
+            lastSectionName = 'upcoming';
+          }
+        }
+      }
+
+      if (lastSectionName === 'past_or_completed') return true;
+
+      // 3. Check within element text itself for past-due/completed badges
+      const directText = el.textContent || '';
+      if (
+        /\b(?:past\s+due|turned\s+in|returned|graded|completed)\b/i.test(directText) &&
+        !/\b(?:upcoming|further\s+out)\b/i.test(directText)
+      ) {
+        const badgeEl = el.querySelector(
+          '[class*="badge" i], [class*="status" i], [data-tid*="status"]'
+        );
+        if (badgeEl && /past\s+due|completed|turned\s+in|returned/i.test(badgeEl.textContent || '')) {
+          return true;
+        }
+      }
+
+      return false;
+    }
+
+    // Helper: Find the nearest active date header preceding the element
+    function findActiveDateHeader(el) {
+      const candidates = Array.from(
+        document.querySelectorAll(
+          '[data-tid*="date-header"], [data-tid*="dateHeader"], [class*="dateHeader" i], [class*="date-header" i], [class*="groupHeader" i], h2, h3, h4, [role="heading"], div[class*="header" i], span[class*="header" i]'
+        )
+      );
+
+      let lastDateHeader = '';
+      for (const c of candidates) {
+        if (c.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_PRECEDING) {
+          const text = (c.textContent || '').trim();
+          // Matches dates like "Due Monday, Sep 7", "Sep 7", "Due tomorrow", "Due Sep 8, 2026", "Tomorrow"
+          if (
+            /(?:due\s+)?(?:today|tomorrow|yesterday|(?:mon|tue|wed|thu|fri|sat|sun)[a-z]*,?\s*)?(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{1,2}(?:st|nd|rd|th)?(?:,?\s*20\d{2})?/i.test(
+              text
+            ) ||
+            /\b(?:today|tomorrow|yesterday)\b/i.test(text)
+          ) {
+            const cleaned = text
+              .replace(/\(\d+\)/g, '')
+              .replace(/^(?:due(?:\s+by|\s+on)?)\s*/i, '')
+              .trim();
+            if (cleaned.length < 50) {
+              lastDateHeader = cleaned;
+            }
+          }
+        }
+      }
+
+      return lastDateHeader;
+    }
+
+    for (const el of candidateElements) {
+      // Skip outer containers that wrap other assignment elements
+      if (
+        el.querySelector(
+          '[data-tid*="assignment-row"], [data-tid*="assignment-item"], [data-tid*="assignment-card"], [role="listitem"]'
+        )
+      ) {
+        continue;
+      }
+
+      // Drop any item under "Past due" or "Completed"
+      if (isPastOrCompletedContext(el)) {
+        continue;
+      }
+
+      const text = el.textContent || '';
+      if (!text.trim()) continue;
+
+      // 1. Extract Due Date String
+      let rawDueString = '';
+      const activeDateHeader = findActiveDateHeader(el);
+
+      // Check if element has its own full due date text
+      const dueMatch = text.match(
+        /(?:due(?:\s+by|\s+on|\s+at)?|deadline:?|due\s+date:?)\s*([^\n\r•|]+)/i
+      );
+
+      // Extract time from card if present: e.g. "1:00 AM", "11:59 PM", "23:59", "5:00 PM"
+      const timeMatch = text.match(/\b(\d{1,2}:\d{2}(?::\d{2})?\s*(?:am|pm)?)\b/i);
+
+      if (dueMatch) {
+        let extractedDue = dueMatch[1].trim();
+        if (
+          /\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|today|tomorrow)\b/i.test(extractedDue)
+        ) {
+          if (!/\b20\d{2}\b/.test(extractedDue) && !/\b(?:today|tomorrow)\b/i.test(extractedDue)) {
+            extractedDue = `${extractedDue}, 2026`;
+          }
+          rawDueString = extractedDue;
+        } else if (activeDateHeader && timeMatch) {
+          const datePart = /\b20\d{2}\b/.test(activeDateHeader)
+            ? activeDateHeader
+            : `${activeDateHeader}, 2026`;
+          rawDueString = `${datePart} at ${timeMatch[1]}`;
+        } else {
+          rawDueString = extractedDue;
+        }
+      } else if (activeDateHeader && timeMatch) {
+        const datePart = /\b20\d{2}\b/.test(activeDateHeader)
+          ? activeDateHeader
+          : `${activeDateHeader}, 2026`;
+        rawDueString = `${datePart} at ${timeMatch[1]}`;
+      } else if (activeDateHeader) {
+        rawDueString = /\b20\d{2}\b/.test(activeDateHeader)
+          ? `${activeDateHeader} at 11:59 PM`
+          : `${activeDateHeader}, 2026 at 11:59 PM`;
+      }
+
+      // If no valid due date could be resolved, skip
+      if (!rawDueString) continue;
+
+      // 2. Extract Title
+      let title = '';
+      const titleEl = el.querySelector(
+        '[data-tid*="title"], [class*="title" i], [class*="header" i], [role="heading"], h2, h3, h4, strong, a[href]'
+      );
+      if (titleEl && titleEl.textContent.trim()) {
+        title = titleEl.textContent.trim();
+      } else {
+        const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
+        const candidateLines = lines.filter(
+          (l) =>
+            !/^(?:upcoming|further out|past due|completed|assigned|due|points|turned in)$/i.test(l) &&
+            !/\b\d{1,2}:\d{2}\s*(?:am|pm)?\b/i.test(l) &&
+            !/^\d+\s*points?$/i.test(l)
+        );
+        title = candidateLines[0] || '';
+      }
+
+      if (!title || /^(?:upcoming|further out|past due|completed|assigned)$/i.test(title)) {
+        continue;
+      }
+
+      // 3. Extract Course Name
+      let courseName = '';
+      const classEl = el.querySelector(
+        '[data-tid*="class"], [data-tid*="course"], [data-tid*="subTitle"], [class*="subtitle" i], [class*="sub-title" i], [class*="class" i], [class*="course" i], [aria-label*="class" i], [class*="secondary" i]'
+      );
+      if (classEl && classEl.textContent.trim()) {
+        courseName = cleanCourseOrTeamName(classEl.textContent);
+      }
+
+      if (!courseName) {
+        // Match standard class code patterns:
+        // e.g. "CSIT321G1 - 1stSem AY26-27", "IT317[G1][1stSem/26-27]AMPARO", "IT365 Data Analytics 1 - G1 S1 AY2627"
+        const coursePattern =
+          text.match(
+            /\b([A-Z]{2,6}\s*(?:-|\s)?\s*\d{2,4}[A-Z0-9]*[^\n\r•|]*?(?:1stSem|2ndSem|AY\d{2,4}|G\d|AMPARO|[A-Z]{3,}))/i
+          ) || text.match(/\b([A-Z]{2,6}\s*(?:-|\s)?\s*\d{2,4}[A-Z0-9]*\b[^\n\r•|]*)/i);
+
+        if (coursePattern) {
+          courseName = cleanCourseOrTeamName(coursePattern[1]);
+        }
+      }
+
+      if (!courseName) {
+        courseName = 'General';
+      }
+
+      // 4. Extract Deep Link
+      let deepLink = fallbackDeepLink;
+      const linkEl = el.querySelector('a[href]') || el.closest('a[href]');
+      if (linkEl && linkEl.href && !linkEl.href.startsWith('javascript:')) {
+        deepLink = linkEl.href;
+      } else {
+        const dataUrl = el.getAttribute('data-href') || el.getAttribute('data-url');
+        if (dataUrl) {
+          deepLink = dataUrl.startsWith('http') ? dataUrl : `${window.location.origin}${dataUrl}`;
+        }
+      }
+
+      const signature = `${title.toLowerCase()}::${courseName.toLowerCase()}::${rawDueString.toLowerCase()}`;
+      if (!seenSignatures.has(signature)) {
+        seenSignatures.add(signature);
+        extractedTasks.push({
+          title,
+          courseName,
+          rawDueString,
+          deepLink,
+        });
+      }
+    }
+
+    // -------------------------------------------------------------
+    // STRATEGY B: Structured Text Token Fallback Parsing
+    // -------------------------------------------------------------
+    if (extractedTasks.length === 0) {
+      log(
+        '[EDU Hub Reader] Strategy A found 0 items. Attempting Strategy B (structured text token parsing)...'
+      );
+      const rootEl =
+        document.querySelector('[role="main"], [data-tid*="list"], main') || document.body;
+      const fullText = rootEl.innerText || rootEl.textContent || '';
+
+      // Only parse text before "Past due" or "Completed"
+      const pastDueIndex = fullText.search(/\b(?:Past due|Completed|Returned|Turned in)\b/i);
+      const upcomingPortion = pastDueIndex !== -1 ? fullText.slice(0, pastDueIndex) : fullText;
+
+      const lines = upcomingPortion
+        .split('\n')
+        .map((l) => l.trim())
+        .filter(Boolean);
+
+      let activeDate = '';
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+
+        // Check for date header line
+        const dateMatch =
+          line.match(
+            /(?:due\s+)?(?:today|tomorrow|yesterday|(?:mon|tue|wed|thu|fri|sat|sun)[a-z]*,?\s*)?(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{1,2}(?:st|nd|rd|th)?(?:,?\s*20\d{2})?/i
+          ) || line.match(/^(?:today|tomorrow|due\s+tomorrow|due\s+today)$/i);
+
+        if (dateMatch && line.length < 40) {
+          activeDate = line.replace(/^(?:due(?:\s+by|\s+on)?)\s*/i, '').trim();
+          continue;
+        }
+
+        // Check for course code in line: e.g. "CSIT321G1 - 1stSem AY26-27"
+        const isCourseLine =
+          /\b[A-Z]{2,6}\s*(?:-|\s)?\s*\d{2,4}[A-Z0-9]*/i.test(line) &&
+          (line.includes('Sem') ||
+            line.includes('AY') ||
+            line.includes('G1') ||
+            line.includes('AMPARO') ||
+            line.length < 50);
+
+        if (isCourseLine && i > 0) {
+          const possibleTitle = lines[i - 1];
+          const courseText = cleanCourseOrTeamName(line);
+
+          // Look forward for time
+          let dueString = '';
+          for (let j = i + 1; j <= Math.min(i + 3, lines.length - 1); j++) {
+            const timeM = lines[j].match(/\b(\d{1,2}:\d{2}(?::\d{2})?\s*(?:am|pm)?)\b/i);
+            if (timeM) {
+              const datePart = activeDate
+                ? /\b20\d{2}\b/.test(activeDate)
+                  ? activeDate
+                  : `${activeDate}, 2026`
+                : 'Sep 7, 2026';
+              dueString = `${datePart} at ${timeM[1]}`;
+              break;
+            }
+          }
+
+          if (
+            possibleTitle &&
+            dueString &&
+            !/^(?:upcoming|further out|assignments)$/i.test(possibleTitle)
+          ) {
+            const signature = `${possibleTitle.toLowerCase()}::${courseText.toLowerCase()}::${dueString.toLowerCase()}`;
+            if (!seenSignatures.has(signature)) {
+              seenSignatures.add(signature);
+              extractedTasks.push({
+                title: possibleTitle,
+                courseName: courseText,
+                rawDueString: dueString,
+                deepLink: fallbackDeepLink,
+              });
+            }
+          }
+        }
+      }
+    }
+
+    log(`[EDU Hub Reader] Extracted ${extractedTasks.length} upcoming assignment(s) from EDU Hub.`);
+
+    if (extractedTasks.length > 0) {
+      log(
+        `[EDU Hub Reader] Dispatching HARK_ASSIGNMENTS_FOUND (${extractedTasks.length} items) to background service worker...`
+      );
+      chrome.runtime.sendMessage({
+        type: 'HARK_ASSIGNMENTS_FOUND',
+        userId: config.userId,
+        assignments: extractedTasks,
+        frameUrl: window.location.href,
+      });
+    }
+
+    return extractedTasks;
   }
 
   /**
@@ -1378,9 +1768,53 @@
   // ==========================================
   // Execution Lifecycle
   // ==========================================
-  if (!isTopWindow) {
+  if (isEduAssignmentsHost) {
     // -------------------------------------------------------------
-    // FRAME 2: Assignments Iframe Execution
+    // FRAME 2A: MS Teams EDU Assignments Hub (assignments.edu.cloud.microsoft)
+    // -------------------------------------------------------------
+    log('[EDU Hub Frame] Initializing EDU Assignments Hub observer & scanner...');
+
+    // Listen for cross-frame scan triggers dispatched by top window
+    window.addEventListener('message', (event) => {
+      if (event.data?.type === 'HARK_TRIGGER_SCAN') {
+        log('[EDU Hub Frame] Received cross-frame HARK_TRIGGER_SCAN trigger. Scanning...');
+        scanEduAssignmentsHub();
+      }
+    });
+
+    loadSettingsAndCache().then(() => {
+      // Immediate initial scans after DOM renders
+      setTimeout(() => {
+        scanEduAssignmentsHub();
+      }, 1200);
+
+      setTimeout(() => {
+        scanEduAssignmentsHub();
+      }, 2500);
+
+      // Mutation observer targeting the assignment list container or document.body
+      const targetContainer =
+        document.querySelector(
+          '[data-tid*="assignment-list"], [role="list"], [role="grid"], [role="main"], main'
+        ) ||
+        document.body ||
+        document.documentElement;
+
+      const eduObserver = new MutationObserver(() => {
+        if (debounceTimer) clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(() => {
+          scanEduAssignmentsHub();
+        }, 1000);
+      });
+
+      eduObserver.observe(targetContainer, {
+        childList: true,
+        subtree: true,
+      });
+    });
+  } else if (!isTopWindow) {
+    // -------------------------------------------------------------
+    // FRAME 2B: Generic Assignments Iframe Execution
     // -------------------------------------------------------------
     log('[Assignments Iframe] Registered iframe context. Setting up auto-scan...');
 

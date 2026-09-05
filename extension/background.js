@@ -122,6 +122,31 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             resolversToCall.forEach((r) => r.resolve(responsePayload));
           }
 
+          // Proactively notify any open dashboard tabs so the status pill updates immediately
+          chrome.tabs.query(
+            { url: ['http://localhost:3000/*', 'https://*.vercel.app/*', 'http://localhost/*'] },
+            (dashTabs) => {
+              if (dashTabs && dashTabs.length > 0) {
+                dashTabs.forEach((tab) => {
+                  chrome.tabs.sendMessage(
+                    tab.id,
+                    {
+                      type: 'HARK_SYNC_COMPLETED',
+                      status: 'SUCCESS',
+                      count: totalProcessed || rawAssignments.length,
+                      message: responsePayload.message,
+                    },
+                    () => {
+                      if (chrome.runtime.lastError) {
+                        // ignore if content script not loaded in dashboard tab
+                      }
+                    }
+                  );
+                });
+              }
+            }
+          );
+
           sendResponse({
             status: 'SUCCESS',
             count: totalProcessed,

@@ -9,6 +9,8 @@
   ],
   "host_permissions": [
     "https://teams.microsoft.com/*",
+    "https://assignments.edu.cloud.microsoft/*",
+    "https://*.assignments.edu.cloud.microsoft/*",
     "https://*.assignments.onenote.com/*",
     "https://*.assignments.microsoft.com/*",
     "http://localhost:3000/*",
@@ -33,6 +35,8 @@
     {
       "matches": [
         "https://teams.microsoft.com/*",
+        "https://assignments.edu.cloud.microsoft/*",
+        "https://*.assignments.edu.cloud.microsoft/*",
         "https://*.assignments.onenote.com/*",
         "https://*.assignments.microsoft.com/*"
       ],
