@@ -175,6 +175,7 @@ async function runClean() {
           due_date,
           source_type,
           source_url,
+          deep_link,
           raw_message_hash,
           status
         )
@@ -188,6 +189,9 @@ async function runClean() {
           ${`https://teams.microsoft.com/l/entity/2a84b049-50bc-4535-a646-5677a8207868/assignments?context=${encodeURIComponent(
             JSON.stringify({ title: def.canonicalTitle, course: def.courseCode })
           )}`},
+          ${`https://teams.microsoft.com/l/entity/2a84b049-50bc-4535-a646-5677a8207868/assignments?context=${encodeURIComponent(
+            JSON.stringify({ title: def.canonicalTitle, course: def.courseCode })
+          )}`},
           ${canonicalHash},
           'pending'
         )
@@ -195,6 +199,7 @@ async function runClean() {
         DO UPDATE SET
           title = EXCLUDED.title,
           source_url = EXCLUDED.source_url,
+          deep_link = EXCLUDED.deep_link,
           due_date = EXCLUDED.due_date,
           updated_at = NOW()
         RETURNING id;
@@ -235,6 +240,7 @@ async function runClean() {
           due_date = ${def.canonicalDueIso}::timestamptz,
           course_id = ${courseId || bestMatch.course_id},
           source_url = ${finalUrl},
+          deep_link = ${finalUrl},
           raw_message_hash = ${canonicalHash},
           updated_at = NOW()
         WHERE id = ${bestMatch.id}::uuid;

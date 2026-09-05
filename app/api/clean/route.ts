@@ -182,6 +182,7 @@ async function performDatabaseClean(targetUserId: string) {
           due_date = ${def.canonicalDueIso}::timestamptz,
           course_id = ${courseId},
           source_url = ${finalUrl},
+          deep_link = ${finalUrl},
           raw_message_hash = ${canonicalHash},
           updated_at = NOW()
         WHERE id = ${bestMatch.id}::uuid;
@@ -214,7 +215,7 @@ async function performDatabaseClean(targetUserId: string) {
       t.due_date,
       t.source_type,
       t.source_url,
-      t.source_url AS deep_link,
+      COALESCE(t.deep_link, t.source_url) AS deep_link,
       t.raw_message_hash,
       t.status,
       t.created_at,
