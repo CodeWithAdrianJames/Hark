@@ -683,6 +683,28 @@ export async function POST(req: NextRequest) {
           channel_id: (c.channel_id as string) || null,
         }));
 
+      // Temporary auto-clean or reset query right before inserting:
+      // If query param ?reset=true is passed, or wipe existing tasks where deep_link LIKE '%/classes/all/list'
+      const urlObj = new URL(req.url);
+      const isReset = urlObj.searchParams.get('reset') === 'true';
+
+      if (isReset) {
+        await sql`
+          DELETE FROM tasks
+          WHERE user_id = ${userId}::uuid;
+        `;
+        console.log(`[Fast-Path] ?reset=true: Reset all tasks for user ${userId}`);
+      } else {
+        await sql`
+          DELETE FROM tasks
+          WHERE user_id = ${userId}::uuid
+            AND (
+              deep_link LIKE '%/classes/all/list'
+              OR source_url LIKE '%/classes/all/list'
+            );
+        `;
+      }
+
       let insertedCount = 0;
       let updatedCount = 0;
       const syncedTasks: Array<Record<string, unknown>> = [];
@@ -720,41 +742,44 @@ export async function POST(req: NextRequest) {
           INSERT INTO tasks (
             user_id,
             course_id,
+            course_name,
             title,
             description,
             due_date,
             source_type,
             source_url,
             deep_link,
+            urgency,
             raw_message_hash,
-            status
+            status,
+            created_at,
+            updated_at
           )
           VALUES (
             ${userId}::uuid,
             ${courseId ? courseId : null},
+            ${cleanName},
             ${title},
             ${description},
             ${dueDateIso}::timestamptz,
             'official_assignment',
             ${deepLink},
             ${deepLink},
+            'upcoming',
             ${rawHash},
-            'pending'
+            'pending',
+            NOW(),
+            NOW()
           )
-          ON CONFLICT (raw_message_hash)
+          ON CONFLICT (user_id, raw_message_hash)
           DO UPDATE SET
+            deep_link = EXCLUDED.deep_link,
             title = EXCLUDED.title,
+            course_name = EXCLUDED.course_name,
             course_id = COALESCE(EXCLUDED.course_id, tasks.course_id),
             due_date = EXCLUDED.due_date,
             description = COALESCE(EXCLUDED.description, tasks.description),
-            source_url = CASE
-              WHEN EXCLUDED.source_url IS NOT NULL 
-                AND EXCLUDED.source_url != '' 
-                AND NOT (EXCLUDED.source_url LIKE '%/classes/all/list' AND tasks.source_url NOT LIKE '%/classes/all/list')
-              THEN EXCLUDED.source_url
-              ELSE tasks.source_url
-            END,
-            deep_link = EXCLUDED.deep_link,
+            source_url = EXCLUDED.deep_link,
             updated_at = NOW()
           RETURNING (xmax = 0) AS is_insert, id, title, due_date, source_url, deep_link;
         `;

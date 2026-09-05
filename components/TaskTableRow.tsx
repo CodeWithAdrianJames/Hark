@@ -21,7 +21,7 @@ import {
   getUrgencyBadgeClasses,
 } from '@/lib/dateUtils';
 
-interface TaskTableRowProps {
+export interface TaskTableRowProps {
   task: TaskItem;
   onToggleStatus: (taskId: string, newStatus: 'pending' | 'completed') => void;
   isUpdating?: boolean;
@@ -215,24 +215,15 @@ export const TaskTableRow: React.FC<TaskTableRowProps> = ({
         <td className="py-3 px-3.5 whitespace-nowrap text-right align-middle w-28">
           <div className="flex items-center justify-end gap-1.5">
             {/* Open in Teams */}
-            {task.deep_link || teamsUrl ? (
-              <a
-                href={task.deep_link || teamsUrl || '#'}
-                target="_blank"
-                rel="noopener noreferrer"
-                title="Open in Microsoft Teams"
-                className="inline-flex items-center justify-center p-1.5 rounded-lg bg-slate-800/80 hover:bg-indigo-600 text-slate-300 hover:text-white border border-slate-700/60 hover:border-indigo-500 transition-all shadow-xs"
-              >
-                <ExternalLink className="w-3.5 h-3.5" />
-              </a>
-            ) : (
-              <span
-                title="No direct Teams link available"
-                className="inline-flex items-center justify-center p-1.5 rounded-lg bg-slate-900/50 text-slate-600 border border-slate-800/40 cursor-not-allowed"
-              >
-                <ExternalLink className="w-3.5 h-3.5 opacity-40" />
-              </span>
-            )}
+            <a
+              href={task.deep_link || (task as any).deepLink || teamsUrl || '#'}
+              target="_blank"
+              rel="noopener noreferrer"
+              title="Open assignment in Teams"
+              className="inline-flex items-center justify-center p-1.5 rounded-lg bg-slate-800/80 hover:bg-indigo-600 text-slate-300 hover:text-white border border-slate-700/60 hover:border-indigo-500 transition-all shadow-xs"
+            >
+              <ExternalLink className="w-3.5 h-3.5" />
+            </a>
 
             {/* Add to Google Calendar */}
             <a
