@@ -23,6 +23,8 @@ import {
 } from 'lucide-react';
 import { TaskItem } from '@/components/TaskCard';
 import { TaskTableRow } from '@/components/TaskTableRow';
+import { ExtensionBanner, ExtensionStatusBadge } from '@/components/ExtensionBanner';
+import { useHarkExtension } from '@/hooks/useHarkExtension';
 import { parseDueDate, exportToICS } from '@/lib/dateUtils';
 
 interface Course {
@@ -40,6 +42,9 @@ export default function StudentDashboardPage() {
   const [inputUserId, setInputUserId] = useState<string>(DEFAULT_USER_ID);
   const [isEditingUser, setIsEditingUser] = useState<boolean>(false);
   const [copiedKey, setCopiedKey] = useState<boolean>(false);
+
+  // Hark Chrome Extension Auto-Detection & Pairing
+  const extensionState = useHarkExtension(userId);
 
   const [tasks, setTasks] = useState<TaskItem[]>([]);
   const [courses, setCourses] = useState<Course[]>([]);
@@ -277,6 +282,9 @@ export default function StudentDashboardPage() {
               )}
             </div>
 
+            {/* Chrome Extension Status Indicator */}
+            <ExtensionStatusBadge extensionState={extensionState} />
+
             {/* Refresh Button */}
             <button
               onClick={() => {
@@ -304,6 +312,9 @@ export default function StudentDashboardPage() {
 
       {/* Main Content Area */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-8 py-6 flex flex-col gap-6">
+        {/* Chrome Extension Onboarding Banner */}
+        <ExtensionBanner extensionState={extensionState} activeUserId={userId} />
+
         {/* Metric Summary Bar */}
         <section className="grid grid-cols-2 sm:grid-cols-4 gap-3 sm:gap-4">
           {/* Active Upcoming Counter */}

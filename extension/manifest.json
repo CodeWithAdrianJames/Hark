@@ -11,6 +11,17 @@
     "http://localhost:3000/*",
     "https://*/*"
   ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "externally_connectable": {
+    "matches": [
+      "http://localhost/*",
+      "https://localhost/*",
+      "https://*.vercel.app/*",
+      "https://your-production-domain.com/*"
+    ]
+  },
   "action": {
     "default_popup": "popup.html",
     "default_title": "Hark for MS Teams Settings"
