@@ -657,8 +657,23 @@
       }
     }
 
-    if (!extractedTitle) {
-      extractedTitle = 'Course Assignment';
+    // Discard if no clear title could be resolved or if it is generic placeholder
+    if (!extractedTitle || extractedTitle.trim().length < 2) {
+      return null;
+    }
+    const cleanLowerTitle = extractedTitle.trim().toLowerCase();
+    if (
+      cleanLowerTitle === 'course assignment' ||
+      cleanLowerTitle === 'untitled assignment' ||
+      cleanLowerTitle === 'assignments' ||
+      cleanLowerTitle === 'assignment'
+    ) {
+      return null;
+    }
+
+    // Discard if explicitly marked as past due or turned in
+    if (/\b(?:past\s+due|turned\s+in|returned)\b/i.test(containerText) && !/\bdue\s+(?:today|tomorrow|at|by|on)\b/i.test(containerText)) {
+      return null;
     }
 
     // 3. Deep Link: exact assignment URL, button action, or canonical route deep link

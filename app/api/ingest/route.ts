@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import crypto from 'crypto';
 import { GoogleGenAI, Type } from '@google/genai';
 import { getDb } from '@/lib/db';
+import { getStartOfToday } from '@/lib/dateUtils';
 
 export const dynamic = 'force-dynamic';
 
@@ -224,7 +225,7 @@ async function resolveDateWithLightweightPrompt(
   rawDueString: string,
   userTimezone: string,
   referenceTimestamp: string
-): Promise<string> {
+): Promise<string | null> {
   const modelName = process.env.GEMINI_MODEL || 'gemini-3.6-flash';
   const prompt = `Convert the assignment deadline phrase "${rawDueString}" into a strict ISO 8601 string.
 Base Reference Sent Time: "${referenceTimestamp}"
@@ -249,7 +250,7 @@ Return strictly JSON in this exact shape: { "due_date_iso": "..." }`;
     console.warn('Lightweight date conversion prompt error:', err);
   }
 
-  return resolveDueDateToUtcIso(undefined, userTimezone, referenceTimestamp);
+  return null;
 }
 
 /**
@@ -300,16 +301,13 @@ function resolveDueDateToUtcIso(
   rawIso: string | undefined | null,
   timezone: string,
   fallbackTimestamp: string
-): string {
+): string | null {
   if (!rawIso || typeof rawIso !== 'string') {
-    const base = fallbackTimestamp ? new Date(fallbackTimestamp) : new Date();
-    const baseTime = isNaN(base.getTime()) ? Date.now() : base.getTime();
-    const fallback = new Date(baseTime + 7 * 24 * 60 * 60 * 1000);
-    fallback.setHours(23, 59, 59, 0);
-    return fallback.toISOString();
+    return null;
   }
 
   const trimmed = rawIso.trim();
+  if (!trimmed) return null;
 
   // 1. If string explicitly has an offset (+08:00, -05:00, or Z), standard Date parses to exact UTC
   const hasTimezoneDesignator = /([Zz]|[+-]\d{2}:?\d{2})$/.test(trimmed);
@@ -350,12 +348,7 @@ function resolveDueDateToUtcIso(
     return parsedDirect.toISOString();
   }
 
-  // 4. Default 7-day fallback
-  const base = fallbackTimestamp ? new Date(fallbackTimestamp) : new Date();
-  const baseTime = isNaN(base.getTime()) ? Date.now() : base.getTime();
-  const fallback = new Date(baseTime + 7 * 24 * 60 * 60 * 1000);
-  fallback.setHours(23, 59, 59, 0);
-  return fallback.toISOString();
+  return null;
 }
 
 /**
@@ -602,16 +595,34 @@ export async function POST(req: NextRequest) {
     const apiKey = process.env.GEMINI_API_KEY;
     const ai = apiKey ? new GoogleGenAI({ apiKey }) : null;
 
+    const startOfToday = getStartOfToday(userTimezone);
+
     // ==========================================
     // 2. Fast-Path Bypass for Native Cards
     // ==========================================
     for (const { hash, msg } of nativeCardEntries) {
+      // 1. Title validation: discard if lacking clear assignment title
+      const rawTitle = (msg.title || '').trim();
+      if (!rawTitle || rawTitle.length < 2) continue;
+      const lowerTitle = rawTitle.toLowerCase();
+      if (
+        lowerTitle === 'untitled assignment' ||
+        lowerTitle === 'course assignment' ||
+        lowerTitle === 'assignment' ||
+        lowerTitle === 'assignments'
+      ) {
+        continue;
+      }
+
+      // 2. Due date validation: discard if rawDueString missing
+      if (!msg.rawDueString || !msg.rawDueString.trim()) continue;
+
       const referenceTimestamp = msg.timestamp || new Date().toISOString();
       const baseDate = new Date(referenceTimestamp);
 
       // Fast deterministic parsing first
       let resolvedDueDate = parseDeterministicDate(
-        msg.rawDueString!,
+        msg.rawDueString,
         userTimezone,
         isNaN(baseDate.getTime()) ? new Date() : baseDate
       );
@@ -620,14 +631,22 @@ export async function POST(req: NextRequest) {
       if (!resolvedDueDate && ai) {
         resolvedDueDate = await resolveDateWithLightweightPrompt(
           ai,
-          msg.rawDueString!,
+          msg.rawDueString,
           userTimezone,
           referenceTimestamp
         );
       }
 
-      if (!resolvedDueDate) {
-        resolvedDueDate = resolveDueDateToUtcIso(undefined, userTimezone, referenceTimestamp);
+      // Discard if due date cannot be resolved
+      if (!resolvedDueDate) continue;
+
+      const dueDateObj = new Date(resolvedDueDate);
+      if (isNaN(dueDateObj.getTime())) continue;
+
+      // Ingestion Rule: Only discard overdue assignments (due date strictly before the start of today, 00:00:00 local time).
+      // Keep ALL upcoming assignments (whether due tomorrow, next week, or next month).
+      if (dueDateObj.getTime() < startOfToday.getTime()) {
+        continue;
       }
 
       const courseId = await resolveCourseId(channelName);
@@ -635,7 +654,7 @@ export async function POST(req: NextRequest) {
       tasksToInsert.push({
         user_id: userId,
         course_id: courseId,
-        title: msg.title?.trim() || 'Untitled Assignment',
+        title: rawTitle,
         description: `Official assignment from ${channelName || 'MS Teams'}. Due: ${msg.rawDueString}`,
         due_date: resolvedDueDate,
         source_type: 'official_assignment',
@@ -685,7 +704,8 @@ Critical Timezone & Deadline Instructions:
 3. Always return 'due_date_iso' as a fully qualified ISO 8601 string including the correct timezone offset (e.g. "2026-09-06T23:59:00+08:00") or converted cleanly to UTC with an exact Z suffix matching that exact local moment.
 4. If only a date is mentioned without a specific time, assume 23:59:59 on that date in the user's local timezone ("${userTimezone}").
 5. Extract concise title, description (instructions or submission links), and course code.
-6. Return false for is_assignment if this is casual communication, greetings, or general Q&A without a clear actionable assignment or deadline.`;
+6. Return false for is_assignment if this is casual communication, greetings, or general Q&A without a clear actionable assignment or resolvable deadline.
+7. If no deadline or due date can be resolved, return due_date_iso as null.`;
 
             const modelName = process.env.GEMINI_MODEL || 'gemini-3.6-flash';
             let response;
@@ -734,17 +754,40 @@ Critical Timezone & Deadline Instructions:
 
       // Convert parsed chat assignments into tasksToInsert
       for (const { hash, msg, extraction } of parsedAssignments) {
-        const courseId = await resolveCourseId(extraction.course_code);
+        // 1. Validate title: discard if lacking clear assignment title
+        const rawTitle = (extraction.title || '').trim();
+        if (!rawTitle || rawTitle.length < 2 || rawTitle.toLowerCase() === 'untitled assignment') {
+          continue;
+        }
+
+        // 2. Validate due date: discard if lacking resolvable due date
+        if (!extraction.due_date_iso || !extraction.due_date_iso.trim()) {
+          continue;
+        }
+
         const resolvedDueDateUtc = resolveDueDateToUtcIso(
           extraction.due_date_iso,
           userTimezone,
           msg.timestamp || new Date().toISOString()
         );
 
+        if (!resolvedDueDateUtc) continue;
+
+        const dueDateObj = new Date(resolvedDueDateUtc);
+        if (isNaN(dueDateObj.getTime())) continue;
+
+        // Ingestion Rule: Only discard overdue assignments (due date strictly before the start of today, 00:00:00 local time).
+        // Keep ALL upcoming assignments (whether due tomorrow, next week, or next month).
+        if (dueDateObj.getTime() < startOfToday.getTime()) {
+          continue;
+        }
+
+        const courseId = await resolveCourseId(extraction.course_code);
+
         tasksToInsert.push({
           user_id: userId,
           course_id: courseId,
-          title: extraction.title?.trim() || 'Untitled Assignment',
+          title: rawTitle,
           description: extraction.description?.trim() || null,
           due_date: resolvedDueDateUtc,
           source_type: 'chat_announcement',

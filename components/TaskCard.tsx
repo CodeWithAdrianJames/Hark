@@ -57,13 +57,16 @@ export const TaskCard: React.FC<TaskCardProps> = ({
     }
     switch (dueInfo.urgency) {
       case 'overdue':
-        return 'bg-rose-500/15 text-rose-300 border-rose-500/30 animate-pulse';
+        return 'bg-rose-500/20 text-rose-300 border-rose-500/40 animate-pulse';
       case 'today':
+        return 'bg-rose-500/15 text-rose-300 border-rose-500/30';
+      case 'tomorrow':
         return 'bg-amber-500/15 text-amber-300 border-amber-500/30';
-      case 'this_week':
-        return 'bg-indigo-500/15 text-indigo-300 border-indigo-500/30';
+      case 'within_7_days':
+        return 'bg-blue-500/15 text-blue-300 border-blue-500/30';
+      case 'later':
       default:
-        return 'bg-slate-800/80 text-slate-400 border-slate-700/60';
+        return 'bg-slate-800 text-slate-400 border-slate-700/60';
     }
   };
 

@@ -3,10 +3,34 @@
  * Provides timezone-aware local date formatting and Google Calendar integration.
  */
 
+export type UrgencyTier = 'overdue' | 'today' | 'tomorrow' | 'within_7_days' | 'later';
+
 export interface FormattedDueStatus {
   formattedDate: string;
   countdownText: string;
-  urgency: 'overdue' | 'today' | 'this_week' | 'later';
+  urgency: UrgencyTier;
+}
+
+/**
+ * Calculates the start of today (00:00:00) in the specified timezone (defaults to 'Asia/Manila' / UTC+8).
+ */
+export function getStartOfToday(timezone: string = 'Asia/Manila'): Date {
+  const now = new Date();
+  const dateStr = new Intl.DateTimeFormat('en-CA', { timeZone: timezone }).format(now); // 'YYYY-MM-DD'
+
+  let offsetStr = '+08:00';
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: timezone,
+      timeZoneName: 'longOffset',
+    }).formatToParts(now);
+    const tzPart = parts.find((p) => p.type === 'timeZoneName');
+    const match = tzPart?.value?.match(/GMT([+-]\d{2}:?\d{2})/);
+    if (match) offsetStr = match[1];
+  } catch {
+    // fallback +08:00
+  }
+  return new Date(`${dateStr}T00:00:00${offsetStr}`);
 }
 
 /**
@@ -32,9 +56,63 @@ export function formatLocalDeadline(dueDateString: string): string {
 }
 
 /**
- * Parses a due date timestamp and generates a localized countdown status
+ * Returns consistent Tailwind badge styles for each urgency tier
  */
-export function parseDueDate(dueDateString: string): FormattedDueStatus {
+export function getUrgencyBadgeClasses(urgency: UrgencyTier, isCompleted = false): {
+  badge: string;
+  dot: string;
+  label: string;
+} {
+  if (isCompleted) {
+    return {
+      badge: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20',
+      dot: 'bg-emerald-400',
+      label: 'Completed',
+    };
+  }
+  switch (urgency) {
+    case 'overdue':
+      return {
+        badge: 'bg-rose-500/20 text-rose-300 border-rose-500/40 animate-pulse',
+        dot: 'bg-rose-500',
+        label: 'Overdue',
+      };
+    case 'today':
+      return {
+        badge: 'bg-rose-500/15 text-rose-300 border-rose-500/30',
+        dot: 'bg-rose-400',
+        label: 'Due Today',
+      };
+    case 'tomorrow':
+      return {
+        badge: 'bg-amber-500/15 text-amber-300 border-amber-500/30',
+        dot: 'bg-amber-400',
+        label: 'Due Tomorrow',
+      };
+    case 'within_7_days':
+      return {
+        badge: 'bg-blue-500/15 text-blue-300 border-blue-500/30',
+        dot: 'bg-blue-400',
+        label: 'Due this week',
+      };
+    case 'later':
+    default:
+      return {
+        badge: 'bg-slate-800 text-slate-400 border-slate-700/60',
+        dot: 'bg-slate-400',
+        label: '8+ Days',
+      };
+  }
+}
+
+/**
+ * Parses a due date timestamp and generates a localized countdown status with 4 distinct urgency tiers:
+ * - Red: Due today
+ * - Yellow: Due tomorrow
+ * - Blue: Due within 7 days
+ * - Slate: Due in 8+ days
+ */
+export function parseDueDate(dueDateString: string, timezone = 'Asia/Manila'): FormattedDueStatus {
   const due = new Date(dueDateString);
   const now = new Date();
 
@@ -54,15 +132,19 @@ export function parseDueDate(dueDateString: string): FormattedDueStatus {
     hour12: true,
   }).format(due);
 
+  const startOfToday = getStartOfToday(timezone);
+  const startOfTomorrow = new Date(startOfToday.getTime() + 24 * 60 * 60 * 1000);
+  const startOfDayAfterTomorrow = new Date(startOfToday.getTime() + 48 * 60 * 60 * 1000);
+  const eightDaysFromToday = new Date(startOfToday.getTime() + 8 * 24 * 60 * 60 * 1000);
+
   const diffMs = due.getTime() - now.getTime();
   const diffHours = Math.round(diffMs / (1000 * 60 * 60));
-  const diffDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
+  const diffDays = Math.ceil((due.getTime() - startOfToday.getTime()) / (1000 * 60 * 60 * 24));
 
-  // Overdue
-  if (diffMs < 0) {
-    const absHours = Math.abs(diffHours);
+  // 1. Strictly Overdue (due before 00:00:00 of today)
+  if (due.getTime() < startOfToday.getTime()) {
     const absDays = Math.abs(diffDays);
-    const countdownText = absDays > 0 ? `Overdue by ${absDays}d` : `Overdue by ${absHours}h`;
+    const countdownText = absDays > 0 ? `Overdue by ${absDays}d` : 'Overdue';
     return {
       formattedDate,
       countdownText,
@@ -70,17 +152,16 @@ export function parseDueDate(dueDateString: string): FormattedDueStatus {
     };
   }
 
-  // Due Today
-  const isToday =
-    due.getDate() === now.getDate() &&
-    due.getMonth() === now.getMonth() &&
-    due.getFullYear() === now.getFullYear();
-
-  if (isToday) {
-    const countdownText =
-      diffHours <= 1
-        ? 'Due in < 1 hour'
-        : `Due in ${diffHours} hours (${timePart})`;
+  // 2. Due Today (startOfToday <= due < startOfTomorrow) -> RED
+  if (due.getTime() < startOfTomorrow.getTime()) {
+    let countdownText = `Due today at ${timePart}`;
+    if (diffMs > 0 && diffHours <= 1) {
+      countdownText = 'Due in < 1 hr';
+    } else if (diffMs > 0 && diffHours < 12) {
+      countdownText = `Due in ${diffHours}h (${timePart})`;
+    } else if (diffMs < 0) {
+      countdownText = `Due today (${timePart})`;
+    }
     return {
       formattedDate,
       countdownText,
@@ -88,33 +169,26 @@ export function parseDueDate(dueDateString: string): FormattedDueStatus {
     };
   }
 
-  // Due Tomorrow
-  const tomorrow = new Date(now);
-  tomorrow.setDate(now.getDate() + 1);
-  const isTomorrow =
-    due.getDate() === tomorrow.getDate() &&
-    due.getMonth() === tomorrow.getMonth() &&
-    due.getFullYear() === tomorrow.getFullYear();
-
-  if (isTomorrow) {
+  // 3. Due Tomorrow (startOfTomorrow <= due < startOfDayAfterTomorrow) -> YELLOW
+  if (due.getTime() < startOfDayAfterTomorrow.getTime()) {
     return {
       formattedDate,
       countdownText: `Due tomorrow at ${timePart}`,
-      urgency: 'this_week',
+      urgency: 'tomorrow',
     };
   }
 
-  // Within next 7 days (This Week)
-  if (diffDays <= 7) {
+  // 4. Due within 7 days (startOfDayAfterTomorrow <= due < eightDaysFromToday) -> BLUE
+  if (due.getTime() < eightDaysFromToday.getTime()) {
     const weekday = new Intl.DateTimeFormat(undefined, { weekday: 'short' }).format(due);
     return {
       formattedDate,
-      countdownText: `Due ${weekday} at ${timePart}`,
-      urgency: 'this_week',
+      countdownText: `Due ${weekday} • ${timePart}`,
+      urgency: 'within_7_days',
     };
   }
 
-  // Later
+  // 5. Due in 8+ days -> SLATE / NEUTRAL
   return {
     formattedDate,
     countdownText: `Due in ${diffDays} days`,
