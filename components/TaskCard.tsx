@@ -166,9 +166,10 @@ export const TaskCard: React.FC<TaskCardProps> = ({
             title: task.title,
             course_code: task.course_code || undefined,
           });
-          return teamsUrl ? (
+          const finalHref = task.deep_link || teamsUrl;
+          return finalHref ? (
             <a
-              href={teamsUrl}
+              href={finalHref}
               target="_blank"
               rel="noopener noreferrer"
               title="Open assignment or channel in Microsoft Teams"

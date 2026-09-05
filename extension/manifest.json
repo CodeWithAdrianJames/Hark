@@ -56,6 +56,15 @@
       "matches": [
         "https://teams.microsoft.com/*"
       ]
+    },
+    {
+      "resources": [
+        "edu_fiber.js"
+      ],
+      "matches": [
+        "https://assignments.edu.cloud.microsoft/*",
+        "https://*.assignments.edu.cloud.microsoft/*"
+      ]
     }
   ]
 }

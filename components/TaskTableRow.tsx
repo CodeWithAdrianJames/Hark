@@ -215,9 +215,9 @@ export const TaskTableRow: React.FC<TaskTableRowProps> = ({
         <td className="py-3 px-3.5 whitespace-nowrap text-right align-middle w-28">
           <div className="flex items-center justify-end gap-1.5">
             {/* Open in Teams */}
-            {teamsUrl ? (
+            {task.deep_link || teamsUrl ? (
               <a
-                href={teamsUrl}
+                href={task.deep_link || teamsUrl || '#'}
                 target="_blank"
                 rel="noopener noreferrer"
                 title="Open in Microsoft Teams"

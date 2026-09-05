@@ -45,7 +45,7 @@ export async function GET(req: NextRequest) {
         t.due_date,
         t.source_type,
         t.source_url,
-        t.source_url AS deep_link,
+        COALESCE(t.deep_link, t.source_url) AS deep_link,
         t.raw_message_hash,
         t.status,
         t.created_at,

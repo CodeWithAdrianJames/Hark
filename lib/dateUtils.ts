@@ -237,8 +237,17 @@ export function formatTeamsDeepLink(
     formatted = 'https://' + formatted;
   }
 
+  // If it's a specific assignment route, return it directly
+  if (/\/assignments\/[a-zA-Z0-9_\-]+/i.test(formatted)) {
+    return formatted;
+  }
+
   // If the link points to the generic /classes/all/list, fallback to MS Teams assignments entity with title/course hint
-  if (formatted.endsWith('/classes/all/list') || formatted.includes('/classes/all/list')) {
+  if (
+    formatted.endsWith('/classes/all/list') ||
+    formatted.endsWith('/classes/all/list/') ||
+    /^https?:\/\/[^/]+\/classes\/all\/list(?:\?|$)/i.test(formatted)
+  ) {
     if (hint?.title) {
       return `https://teams.microsoft.com/l/entity/2a84b049-50bc-4535-a646-5677a8207868/assignments?context=${encodeURIComponent(
         JSON.stringify({ title: hint.title, course: hint.course_code || '' })

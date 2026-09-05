@@ -1476,9 +1476,91 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
       return `${dateHeader}, 2026 ${time}`;
     }
 
+    /**
+     * Helper: Extract React props (classId and assignmentId) from assignment card DOM node
+     */
+    function getAssignmentFiberData(cardEl) {
+      try {
+        const fiberKey = Object.keys(cardEl).find(
+          (k) => k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance')
+        );
+        if (fiberKey) {
+          let cur = cardEl[fiberKey];
+          while (cur) {
+            const p = cur.memoizedProps;
+            if (p) {
+              const candidate = p.assignment || p.item || p.cardData || p;
+              if (candidate && (candidate.classId || candidate.courseId)) {
+                const classId = candidate.classId || candidate.courseId || candidate.classDetails?.id;
+                const assignmentId = candidate.id || cardEl.id;
+                if (classId && assignmentId) {
+                  return {
+                    classId,
+                    assignmentId,
+                    deepLink: `https://assignments.edu.cloud.microsoft/classes/${classId}/assignments/${assignmentId}?returnPath=%2Fclasses%2Fall%2Flist`,
+                  };
+                }
+              }
+            }
+            cur = cur.return;
+          }
+        }
+
+        // Check if stamped by edu_fiber.js page-context extractor
+        const stampedDeepLink =
+          cardEl.getAttribute('data-hark-fiber-deeplink') || cardEl.dataset?.harkFiberDeeplink;
+        if (stampedDeepLink) {
+          return {
+            classId: cardEl.getAttribute('data-hark-class-id') || cardEl.dataset?.harkClassId || '',
+            assignmentId:
+              cardEl.getAttribute('data-hark-assignment-id') || cardEl.dataset?.harkAssignmentId || '',
+            deepLink: stampedDeepLink,
+          };
+        }
+
+        // Check child element if cardEl itself doesn't directly expose the fiber key
+        const childWithFiber = cardEl.querySelector && cardEl.querySelector('*');
+        if (childWithFiber) {
+          const childFiberKey = Object.keys(childWithFiber).find(
+            (k) => k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance')
+          );
+          if (childFiberKey) {
+            let cur = childWithFiber[childFiberKey];
+            while (cur) {
+              const p = cur.memoizedProps;
+              if (p) {
+                const candidate = p.assignment || p.item || p.cardData || p;
+                if (candidate && (candidate.classId || candidate.courseId)) {
+                  const classId = candidate.classId || candidate.courseId || candidate.classDetails?.id;
+                  const assignmentId = candidate.id || cardEl.id;
+                  if (classId && assignmentId) {
+                    return {
+                      classId,
+                      assignmentId,
+                      deepLink: `https://assignments.edu.cloud.microsoft/classes/${classId}/assignments/${assignmentId}?returnPath=%2Fclasses%2Fall%2Flist`,
+                    };
+                  }
+                }
+              }
+              cur = cur.return;
+            }
+          }
+        }
+      } catch (err) {
+        console.warn('[Hark] Fiber extraction error:', err);
+      }
+      return null;
+    }
+
     // Helper: Target specific deep link for an assignment row/card element
     function extractEduCardDeepLink(cardElement) {
       if (!cardElement) return null;
+
+      // 0. Primary: Fiber Data Extractor
+      const fiberData = getAssignmentFiberData(cardElement);
+      if (fiberData?.deepLink) {
+        return fiberData.deepLink;
+      }
 
       // 1. Look for explicit anchor tags: /assignments/ or assignment
       const anchor =
@@ -1557,6 +1639,8 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
     // Method 1: Target Individual Card / Row Elements
     // -------------------------------------------------------------------------
     const cardSelectors = [
+      'div[data-test="assignment-card"]',
+      '[data-test="assignment-card"]',
       '[data-tid*="assignment-row"]',
       '[data-tid*="assignment-item"]',
       '[data-tid*="assignment-card"]',
@@ -1571,7 +1655,7 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
     const cards = Array.from(document.querySelectorAll(cardSelectors.join(', '))).filter((c) => {
       // Avoid outer wrappers
       return !c.querySelector(
-        '[data-tid*="assignment-row"], [data-tid*="assignment-item"], .assignment-card, [role="listitem"]'
+        'div[data-test="assignment-card"], [data-test="assignment-card"], [data-tid*="assignment-row"], [data-tid*="assignment-item"], .assignment-card, [role="listitem"]'
       );
     });
 
@@ -1994,6 +2078,25 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
     return extractedAssignments;
   }
 
+  /**
+   * Injects edu_fiber.js into the main execution context of assignments.edu.cloud.microsoft
+   * to read React Fiber props and stamp deep links directly onto DOM nodes.
+   */
+  function injectEduFiberExtractor() {
+    if (!isEduAssignmentsHost) return;
+    try {
+      const script = document.createElement('script');
+      script.src = chrome.runtime.getURL('edu_fiber.js');
+      script.onload = function () {
+        this.remove();
+      };
+      (document.head || document.documentElement).appendChild(script);
+      log('[EDU Hub Frame] Page-context React fiber extractor (edu_fiber.js) successfully injected.');
+    } catch (err) {
+      logError('Failed to inject edu_fiber.js:', err);
+    }
+  }
+
   // ==========================================
   // Execution Lifecycle
   // ==========================================
@@ -2001,6 +2104,7 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
     // -------------------------------------------------------------
     // FRAME 2A: MS Teams EDU Assignments Hub (assignments.edu.cloud.microsoft)
     // -------------------------------------------------------------
+    injectEduFiberExtractor();
     log('[EDU Hub Frame] Initializing EDU Assignments Hub observer & scanner...');
 
     // Listen for cross-frame scan triggers dispatched by top window
