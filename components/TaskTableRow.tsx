@@ -159,7 +159,7 @@ export const TaskTableRow: React.FC<TaskTableRowProps> = ({
         <td className="py-3 px-3.5 whitespace-nowrap align-middle w-32">
           {task.course_code ? (
             <span className="inline-flex items-center px-2.5 py-0.5 rounded-md text-xs font-semibold font-mono tracking-wide bg-indigo-500/15 text-indigo-300 border border-indigo-500/30 shadow-xs">
-              [{task.course_code}]
+              [{task.course_code.replace(/^\[+|\]+$/g, '')}]
             </span>
           ) : (
             <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] text-slate-500 bg-slate-800/40 border border-slate-800">

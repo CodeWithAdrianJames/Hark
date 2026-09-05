@@ -85,7 +85,7 @@ export const TaskCard: React.FC<TaskCardProps> = ({
         <div className="flex items-center gap-2 flex-wrap">
           {task.course_code && (
             <span className="inline-flex items-center px-2.5 py-0.5 rounded-md text-xs font-semibold uppercase tracking-wider bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
-              {task.course_code}
+              [{task.course_code.replace(/^\[+|\]+$/g, '')}]
             </span>
           )}
 
