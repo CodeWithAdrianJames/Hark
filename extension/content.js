@@ -18,6 +18,13 @@
   const ERROR_STYLE =
     'color: #f87171; font-weight: bold; background: #0f172a; padding: 2px 6px; border-radius: 3px;';
 
+  const isTopWindow = window.self === window.top;
+  console.log(
+    '%c[Hark Frame]',
+    'color: #ffaa00; font-weight: bold; font-size: 11px; padding: 2px 4px; border-radius: 2px;',
+    isTopWindow ? 'Top Teams Window' : `Assignments Iframe (${window.location.host})`
+  );
+
   function log(msg, ...args) {
     console.log(`%c[Hark Extension]%c ${msg}`, LOG_STYLE, 'color: inherit;', ...args);
   }
@@ -38,7 +45,7 @@
     console.log(`%c[Hark Extension]%c ${msg}`, ERROR_STYLE, 'color: #f87171;', ...args);
   }
 
-  log('Initializing Hark dual-layer companion script on Microsoft Teams...');
+  log(`Initializing Hark companion script on ${isTopWindow ? 'Top Teams Window' : 'Assignments Iframe'}...`);
 
   // Configuration State
   let config = {
@@ -72,6 +79,9 @@
    * Injects the main page-context script (injected.js) to intercept fetch/XHR
    */
   function injectNetworkInterceptor() {
+    if (!isTopWindow) {
+      return; // Network interceptor is only needed in the top-level window
+    }
     try {
       const script = document.createElement('script');
       script.src = chrome.runtime.getURL('injected.js');
@@ -1173,39 +1183,264 @@
         });
         return true;
       }
+
+      // 3. Global MS Teams Assignments Hub Auto-Sync Trigger
+      if (request && request.type === 'SCAN_ASSIGNMENTS_HUB') {
+        log(`[Assignments Hub] SCAN_ASSIGNMENTS_HUB received in ${isTopWindow ? 'Top Window' : 'Assignments Iframe'}.`);
+
+        if (isTopWindow) {
+          // Frame 1: Top Teams Window handles navigation
+          const assignmentsBtn = document.querySelector(
+            'button[data-tid*="app-bar-2a84b049"], [data-tid*="app-bar"][aria-label*="Assignments" i], button[aria-label*="Assignments" i], a[aria-label*="Assignments" i], [data-tid*="assignments-app-bar" i]'
+          );
+          if (assignmentsBtn) {
+            log('[Top Frame] Found left-rail Assignments button. Clicking to open Assignments hub...');
+            assignmentsBtn.click();
+          }
+
+          // Broadcast HARK_TRIGGER_SCAN to all child iframes via postMessage
+          const notifyIframes = () => {
+            const iframes = document.querySelectorAll('iframe');
+            if (iframes.length > 0) {
+              log(`[Top Frame] Broadcasting HARK_TRIGGER_SCAN to ${iframes.length} child iframe(s)...`);
+              iframes.forEach((ifr) => {
+                try {
+                  ifr.contentWindow?.postMessage({ type: 'HARK_TRIGGER_SCAN' }, '*');
+                } catch {
+                  // Ignore cross-origin security warnings on third-party frames
+                }
+              });
+            }
+          };
+
+          notifyIframes();
+          setTimeout(notifyIframes, 1200);
+          setTimeout(notifyIframes, 2500);
+
+          // In case Teams v2 natively renders assignment cards in the top DOM
+          scanIframeAssignments()
+            .then((extracted) => {
+              sendResponse({
+                status: extracted.length > 0 ? 'SUCCESS' : 'NAVIGATED',
+                frame: 'top',
+                count: extracted.length,
+              });
+            })
+            .catch((err) => {
+              sendResponse({ status: 'TOP_FRAME_NAVIGATED', error: err.message });
+            });
+          return true;
+        } else {
+          // Frame 2: Inside Assignments Iframe
+          scanIframeAssignments()
+            .then((extracted) => {
+              sendResponse({
+                status: 'SUCCESS',
+                frame: 'iframe',
+                count: extracted.length,
+              });
+            })
+            .catch((err) => {
+              logError('[Assignments Iframe] Failed to extract assignments:', err);
+              sendResponse({
+                status: 'ERROR',
+                frame: 'iframe',
+                error: err.message,
+                count: 0,
+              });
+            });
+          return true;
+        }
+      }
     });
+  }
+
+  /**
+   * Scans assignment cards inside the Assignments iframe (or native Teams assignment view)
+   * and dispatches HARK_ASSIGNMENTS_FOUND to the background service worker.
+   */
+  async function scanIframeAssignments() {
+    log('[Assignments Reader] Scanning frame for student assignment cards/rows...');
+
+    const selectors = [
+      '[data-tid*="assignment-card"]',
+      '[data-tid*="assignment-item"]',
+      '[data-tid*="assignment-row"]',
+      '[data-app*="assignment"]',
+      '[data-tid*="assignment"]',
+      '.assignment-card',
+      '.assignment-item',
+      '[role="listitem"]',
+      '[role="row"]',
+      'div[data-is-focusable="true"]',
+      'div[tabindex="0"]',
+    ];
+
+    const elements = Array.from(document.querySelectorAll(selectors.join(', ')));
+    const extractedAssignments = [];
+    const seenSignatures = new Set();
+    const verifiedContext = getVerifiedTeamAndCourseContext();
+
+    for (const el of elements) {
+      // Skip outer containers that wrap other assignment elements to avoid mangling text
+      if (
+        el.querySelector(
+          '[data-tid*="assignment-card"], [data-tid*="assignment-item"], .assignment-card, [role="listitem"]'
+        )
+      ) {
+        continue;
+      }
+
+      const text = el.textContent || '';
+      const dueMatch = text.match(
+        /(?:due(?:\s+by|\s+on|\s+at)?|deadline:?|due\s+date:?)\s*([^\n\r•|]+)/i
+      );
+      if (!dueMatch) continue;
+
+      const rawDueString = dueMatch[1].trim();
+
+      // Title extraction
+      let title = '';
+      const titleEl = el.querySelector(
+        '[data-tid*="title"], h3, h4, h2, strong, [class*="title" i], [class*="header" i], [role="heading"]'
+      );
+      if (titleEl) {
+        title = titleEl.textContent.trim();
+      } else {
+        const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
+        title = lines[0] || 'Assignment';
+      }
+
+      if (/^(?:upcoming|past due|completed|assigned|past|due)$/i.test(title)) {
+        continue;
+      }
+
+      // Course / Class Name extraction
+      let courseName = '';
+      const classEl = el.querySelector(
+        '[data-tid*="class"], [data-tid*="course"], [class*="class" i], [class*="subtitle" i], [class*="sub-title" i], [aria-label*="class" i], [data-tid*="subtitle"]'
+      );
+      if (classEl) {
+        courseName = cleanCourseOrTeamName(classEl.textContent);
+      }
+      if (!courseName) {
+        const codeMatch = text.match(/\b([A-Z]{2,6}\s*(?:-|\s)?\s*\d{2,4}[A-Z0-9]*)\b/i);
+        if (codeMatch) {
+          courseName = codeMatch[1].toUpperCase();
+        } else {
+          courseName = verifiedContext.cleanCourseName || 'General';
+        }
+      }
+
+      // Deep Link extraction
+      let deepLink = '';
+      const linkEl = el.querySelector('a[href]') || el.closest('a[href]');
+      if (linkEl && linkEl.href) {
+        deepLink = linkEl.href;
+      } else {
+        const dataUrl = el.getAttribute('data-href') || el.getAttribute('data-url');
+        if (dataUrl) {
+          deepLink = dataUrl.startsWith('http') ? dataUrl : `${window.location.origin}${dataUrl}`;
+        } else {
+          deepLink = window.location.href;
+        }
+      }
+
+      const signature = `${title.toLowerCase()}::${courseName.toLowerCase()}::${rawDueString.toLowerCase()}`;
+      if (!seenSignatures.has(signature)) {
+        seenSignatures.add(signature);
+        extractedAssignments.push({
+          title,
+          courseName,
+          rawDueString,
+          deepLink,
+        });
+      }
+    }
+
+    log(`[Assignments Reader] Extracted ${extractedAssignments.length} assignment(s) in frame.`);
+
+    if (extractedAssignments.length > 0) {
+      log(
+        `[Assignments Reader] Dispatching HARK_ASSIGNMENTS_FOUND (${extractedAssignments.length} items) to background service worker...`
+      );
+      chrome.runtime.sendMessage({
+        type: 'HARK_ASSIGNMENTS_FOUND',
+        userId: config.userId,
+        assignments: extractedAssignments,
+        frameUrl: window.location.href,
+      });
+    }
+
+    return extractedAssignments;
   }
 
   // ==========================================
   // Execution Lifecycle
   // ==========================================
-  // 1. Inject Network Interceptor as early as possible
-  injectNetworkInterceptor();
+  if (!isTopWindow) {
+    // -------------------------------------------------------------
+    // FRAME 2: Assignments Iframe Execution
+    // -------------------------------------------------------------
+    log('[Assignments Iframe] Registered iframe context. Setting up auto-scan...');
 
-  // 2. Load settings and initialize fallback DOM observer
-  loadSettingsAndCache().then(() => {
-    if (!config.userId) {
-      logWarn('User ID not set. Open Hark popup to configure your User ID.');
-      return;
-    }
-
-    if (!config.isAutoIngestEnabled) {
-      logWarn('Auto-ingest is disabled in settings.');
-      return;
-    }
-
-    setupObserver();
-
-    // Immediate one-time DOM scan 2 seconds after initialization
-    setTimeout(() => {
-      log('Running initial 2-second DOM scan for existing messages and assignments...');
-      const initialMessages = extractMessagesFromDOM();
-      if (initialMessages.length > 0) {
-        log(`Initial scan found ${initialMessages.length} message(s)/assignment(s). Dispatching...`);
-        dispatchMessagesToHark(initialMessages, 'dom');
-      } else {
-        log('Initial scan complete. No un-synced messages or assignments found.');
+    // Listen for cross-frame scan triggers dispatched by top window
+    window.addEventListener('message', (event) => {
+      if (event.data?.type === 'HARK_TRIGGER_SCAN') {
+        log('[Assignments Iframe] Received cross-frame HARK_TRIGGER_SCAN trigger. Scanning...');
+        scanIframeAssignments();
       }
-    }, 2000);
-  });
+    });
+
+    loadSettingsAndCache().then(() => {
+      // Initial scan after DOM renders
+      setTimeout(() => {
+        scanIframeAssignments();
+      }, 1500);
+
+      // Re-scan when assignment cards mount or student scrolls
+      const iframeObserver = new MutationObserver(() => {
+        if (debounceTimer) clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(() => {
+          scanIframeAssignments();
+        }, 1000);
+      });
+
+      iframeObserver.observe(document.body || document.documentElement, {
+        childList: true,
+        subtree: true,
+      });
+    });
+  } else {
+    // -------------------------------------------------------------
+    // FRAME 1: Top Teams Window Execution
+    // -------------------------------------------------------------
+    injectNetworkInterceptor();
+
+    loadSettingsAndCache().then(() => {
+      if (!config.userId) {
+        logWarn('User ID not set. Open Hark popup to configure your User ID.');
+        return;
+      }
+
+      if (!config.isAutoIngestEnabled) {
+        logWarn('Auto-ingest is disabled in settings.');
+        return;
+      }
+
+      setupObserver();
+
+      // Immediate one-time DOM scan 2 seconds after initialization
+      setTimeout(() => {
+        log('Running initial 2-second DOM scan for existing messages and assignments...');
+        const initialMessages = extractMessagesFromDOM();
+        if (initialMessages.length > 0) {
+          log(`Initial scan found ${initialMessages.length} message(s)/assignment(s). Dispatching...`);
+          dispatchMessagesToHark(initialMessages, 'dom');
+        } else {
+          log('Initial scan complete. No un-synced messages or assignments found.');
+        }
+      }, 2000);
+    });
+  }
 })();

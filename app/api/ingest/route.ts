@@ -486,10 +486,208 @@ function normalizeSourceUrl(url: string | null | undefined): string | null {
   return trimmed;
 }
 
+/**
+ * High-speed deterministic parser for MS Teams Assignment due date strings.
+ * Guarantees zero LLM latency (<1ms) and strictly binds to Asia/Manila (UTC+8).
+ */
+function parseAssignmentDueStringToUtcIso(
+  rawDueString: string | undefined | null,
+  timezone: string = 'Asia/Manila'
+): string | null {
+  if (!rawDueString || typeof rawDueString !== 'string') return null;
+  let text = rawDueString.trim();
+  if (!text) return null;
+
+  // 1. If it is already an ISO timestamp
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(text)) {
+    const d = new Date(text);
+    if (!isNaN(d.getTime())) return d.toISOString();
+  }
+
+  // Strip leading "Due" / "due by" / "deadline:"
+  text = text.replace(/^(?:due(?:\s+by)?|deadline:?)\s*/i, '').trim();
+
+  // Get timezone offset string (e.g. "+08:00")
+  let offset = '+08:00';
+  try {
+    const formatter = new Intl.DateTimeFormat('en-US', {
+      timeZone: timezone,
+      timeZoneName: 'longOffset',
+    });
+    const parts = formatter.formatToParts(new Date());
+    const tzPart = parts.find((p) => p.type === 'timeZoneName');
+    const match = tzPart?.value?.match(/GMT([+-]\d{2}:?\d{2})/);
+    if (match) offset = match[1];
+  } catch {
+    // fallback +08:00
+  }
+
+  // Extract time: e.g. "11:59 PM", "11:59pm", "5:00 AM", "23:59"
+  let hour = 23;
+  let minute = 59;
+  let second = 59;
+
+  const timeMatch = text.match(/(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(am|pm)?/i);
+  if (timeMatch) {
+    let h = parseInt(timeMatch[1], 10);
+    const m = parseInt(timeMatch[2], 10);
+    const s = timeMatch[3] ? parseInt(timeMatch[3], 10) : 0;
+    const meridiem = timeMatch[4]?.toLowerCase();
+
+    if (meridiem === 'pm' && h < 12) h += 12;
+    if (meridiem === 'am' && h === 12) h = 0;
+
+    hour = h;
+    minute = m;
+    second = s;
+
+    // Remove time portion
+    text = text.replace(timeMatch[0], '').replace(/\bat\b/i, '').trim();
+  } else {
+    if (/\bnoon\b/i.test(text)) {
+      hour = 12;
+      minute = 0;
+      second = 0;
+      text = text.replace(/\bnoon\b/i, '').trim();
+    } else if (/\bmidnight\b/i.test(text)) {
+      hour = 23;
+      minute = 59;
+      second = 59;
+      text = text.replace(/\bmidnight\b/i, '').trim();
+    }
+  }
+
+  // Local reference in target timezone
+  const now = new Date();
+  const todayFormatter = new Intl.DateTimeFormat('en-CA', { timeZone: timezone });
+  const todayLocalStr = todayFormatter.format(now); // "YYYY-MM-DD"
+  const [currentYear, currentMonth, currentDay] = todayLocalStr.split('-').map(Number);
+  const pad = (n: number) => String(n).padStart(2, '0');
+
+  // Handle "today" or "tomorrow"
+  if (/\btoday\b/i.test(text)) {
+    const isoWithOffset = `${currentYear}-${pad(currentMonth)}-${pad(currentDay)}T${pad(hour)}:${pad(minute)}:${pad(second)}${offset}`;
+    const parsed = new Date(isoWithOffset);
+    return isNaN(parsed.getTime()) ? null : parsed.toISOString();
+  }
+
+  if (/\btomorrow\b/i.test(text)) {
+    const tomorrowDate = new Date(new Date(`${todayLocalStr}T12:00:00${offset}`).getTime() + 86400000);
+    const tomorrowLocalStr = todayFormatter.format(tomorrowDate);
+    const isoWithOffset = `${tomorrowLocalStr}T${pad(hour)}:${pad(minute)}:${pad(second)}${offset}`;
+    const parsed = new Date(isoWithOffset);
+    return isNaN(parsed.getTime()) ? null : parsed.toISOString();
+  }
+
+  // Month-day matching: e.g. "Sep 12", "September 12", "Sep 12, 2026"
+  const months: Record<string, number> = {
+    jan: 1, january: 1,
+    feb: 2, february: 2,
+    mar: 3, march: 3,
+    apr: 4, april: 4,
+    may: 5,
+    jun: 6, june: 6,
+    jul: 7, july: 7,
+    aug: 8, august: 8,
+    sep: 9, sept: 9, september: 9,
+    oct: 10, october: 10,
+    nov: 11, november: 11,
+    dec: 12, december: 12,
+  };
+
+  const monthRegex = /\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b/i;
+  const monthMatch = text.match(monthRegex);
+
+  if (monthMatch) {
+    const monthName = monthMatch[1].toLowerCase();
+    const monthNum = months[monthName] || 1;
+
+    const dayMatch = text.match(/\b(\d{1,2})(?:st|nd|rd|th)?\b/);
+    const dayNum = dayMatch ? parseInt(dayMatch[1], 10) : 1;
+
+    const yearMatch = text.match(/\b(20\d{2})\b/);
+    let targetYear = yearMatch ? parseInt(yearMatch[1], 10) : currentYear;
+
+    if (!yearMatch && monthNum < currentMonth && currentMonth >= 10) {
+      targetYear += 1;
+    }
+
+    const isoWithOffset = `${targetYear}-${pad(monthNum)}-${pad(dayNum)}T${pad(hour)}:${pad(minute)}:${pad(second)}${offset}`;
+    const parsed = new Date(isoWithOffset);
+    if (!isNaN(parsed.getTime())) {
+      return parsed.toISOString();
+    }
+  }
+
+  // Fallback to standard Date parse
+  const directParse = new Date(text);
+  if (!isNaN(directParse.getTime())) {
+    return directParse.toISOString();
+  }
+
+  return null;
+}
+
+/**
+ * Shared helper to resolve or auto-create verified courses for a user.
+ */
+async function resolveCourseForUser(
+  sql: any,
+  userId: string,
+  targetName: string | null | undefined,
+  targetCode: string | null | undefined,
+  userCourses: Array<{ id: string; code: string; name: string; channel_id: string | null }>,
+  channelFallback?: string | null
+): Promise<string | null> {
+  const rawTarget = (targetName || targetCode || channelFallback || '').trim();
+  let cleanName = cleanCourseName(rawTarget);
+  if (!cleanName) {
+    cleanName = cleanCourseName(channelFallback || '') || 'General';
+  }
+
+  const cleanCode =
+    targetCode && targetCode.length <= 15 && !targetCode.includes(' ')
+      ? targetCode.toUpperCase()
+      : extractCourseCode(cleanName);
+
+  // 1. Try matching existing course for this user (by exact code or name)
+  const matched = userCourses.find(
+    (c) =>
+      c.code.toUpperCase() === cleanCode.toUpperCase() ||
+      c.name.toLowerCase() === cleanName.toLowerCase() ||
+      (cleanName.length > 5 && c.name.toLowerCase().includes(cleanName.toLowerCase())) ||
+      (c.name.length > 5 && cleanName.toLowerCase().includes(c.name.toLowerCase()))
+  );
+
+  if (matched) return matched.id;
+
+  // 2. Create clean course entry in DB if none matched
+  try {
+    const [newCourse] = await sql`
+      INSERT INTO courses (user_id, code, name, channel_id)
+      VALUES (${userId}::uuid, ${cleanCode.slice(0, 50)}, ${cleanName}, ${channelFallback || null})
+      RETURNING id, code, name, channel_id
+    `;
+    if (newCourse) {
+      const id = newCourse.id as string;
+      userCourses.push({
+        id,
+        code: newCourse.code as string,
+        name: newCourse.name as string,
+        channel_id: (newCourse.channel_id as string | null) ?? null,
+      });
+      return id;
+    }
+  } catch (err) {
+    console.warn('Could not auto-create course:', err);
+  }
+  return null;
+}
+
 export async function POST(req: NextRequest) {
   try {
-    const body = (await req.json()) as Partial<IngestPayload>;
-    const { userId, channelName, courseName, courseCode, messages } = body;
+    const body = (await req.json()) as any;
+    const userId = body.userId;
     const userTimezone = (body.timezone || '').trim() || 'Asia/Manila';
 
     // Validate request payload
@@ -500,9 +698,142 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    // =========================================================================
+    // FAST-PATH: Structured Global MS Teams Assignments Payload (No LLM Calls)
+    // =========================================================================
+    if (Array.isArray(body.assignments)) {
+      const assignments = body.assignments as Array<{
+        title?: string;
+        courseName?: string;
+        rawDueString?: string;
+        deepLink?: string;
+        description?: string;
+      }>;
+
+      const startOfToday = getStartOfToday(userTimezone);
+      const sql = getDb();
+
+      // Fetch user's existing courses from Neon
+      const existingCourses = await sql`
+        SELECT id, code, name, channel_id
+        FROM courses
+        WHERE user_id = ${userId}::uuid
+      `;
+      const userCourses: Array<{ id: string; code: string; name: string; channel_id: string | null }> =
+        existingCourses.map((c: Record<string, unknown>) => ({
+          id: c.id as string,
+          code: (c.code as string) || '',
+          name: (c.name as string) || '',
+          channel_id: (c.channel_id as string) || null,
+        }));
+
+      let insertedCount = 0;
+      let updatedCount = 0;
+      let skippedCount = 0;
+      const syncedTasks: Array<Record<string, unknown>> = [];
+
+      for (const item of assignments) {
+        if (!item || !item.title || !item.rawDueString) {
+          skippedCount++;
+          continue;
+        }
+
+        const title = item.title.trim();
+        const rawDue = item.rawDueString.trim();
+        const dueDateIso = parseAssignmentDueStringToUtcIso(rawDue, userTimezone);
+
+        if (!dueDateIso) {
+          console.warn(`[Fast-Path] Could not parse deadline "${rawDue}" for "${title}"`);
+          skippedCount++;
+          continue;
+        }
+
+        // Filter out past overdue assignments (< startOfToday)
+        if (new Date(dueDateIso).getTime() < startOfToday.getTime()) {
+          console.log(`[Fast-Path] Discarding overdue assignment: "${title}" due ${dueDateIso}`);
+          skippedCount++;
+          continue;
+        }
+
+        // Ground-truth course resolution
+        const cleanName = cleanCourseName(item.courseName) || 'General';
+        const cleanCode = extractCourseCode(cleanName);
+        const courseId = await resolveCourseForUser(sql, userId, cleanName, cleanCode, userCourses);
+
+        // Deterministic raw message hash
+        const rawHash = crypto
+          .createHash('sha256')
+          .update(`assignment:${userId}:${title}:${cleanCode}:${rawDue}`)
+          .digest('hex');
+
+        const deepLink = item.deepLink?.trim() || null;
+        const description = item.description?.trim() || null;
+
+        const result = await sql`
+          INSERT INTO tasks (
+            user_id,
+            course_id,
+            title,
+            description,
+            due_date,
+            source_type,
+            source_url,
+            raw_message_hash,
+            status
+          )
+          VALUES (
+            ${userId}::uuid,
+            ${courseId ? courseId : null},
+            ${title},
+            ${description},
+            ${dueDateIso}::timestamptz,
+            'official_assignment',
+            ${deepLink},
+            ${rawHash},
+            'pending'
+          )
+          ON CONFLICT (raw_message_hash)
+          DO UPDATE SET
+            title = EXCLUDED.title,
+            due_date = EXCLUDED.due_date,
+            description = COALESCE(EXCLUDED.description, tasks.description),
+            source_url = COALESCE(EXCLUDED.source_url, tasks.source_url),
+            updated_at = NOW()
+          RETURNING (xmax = 0) AS is_insert, id, title, due_date;
+        `;
+
+        if (result && result.length > 0) {
+          if (result[0].is_insert) {
+            insertedCount++;
+          } else {
+            updatedCount++;
+          }
+          syncedTasks.push(result[0]);
+        }
+      }
+
+      console.log(
+        `[Fast-Path] Processed ${assignments.length} assignments: ${insertedCount} inserted, ${updatedCount} updated, ${skippedCount} skipped.`
+      );
+
+      return jsonResponse(
+        {
+          success: true,
+          count: insertedCount + updatedCount,
+          inserted: insertedCount,
+          updated: updatedCount,
+          skipped: skippedCount,
+          tasks: syncedTasks,
+        },
+        200
+      );
+    }
+
+    const { channelName, courseName, courseCode, messages } = body as Partial<IngestPayload>;
+
     if (!Array.isArray(messages)) {
       return jsonResponse(
-        { error: 'Missing or invalid "messages" field: must be an array.' },
+        { error: 'Missing or invalid "messages" or "assignments" field: must be an array.' },
         400
       );
     }
@@ -607,48 +938,14 @@ export async function POST(req: NextRequest) {
       courseNameHint?: string | null,
       courseCodeHint?: string | null
     ): Promise<string | null> {
-      const rawTarget = (courseNameHint || courseName || courseCodeHint || courseCode || channelName || '').trim();
-      let cleanName = cleanCourseName(rawTarget);
-      if (!cleanName) {
-        cleanName = cleanCourseName(channelName || '') || 'General';
-      }
-
-      const cleanCode = (courseCodeHint && courseCodeHint.length <= 15 && !courseCodeHint.includes(' '))
-        ? courseCodeHint.toUpperCase()
-        : extractCourseCode(cleanName);
-
-      // 1. Try matching existing course for this user (by exact code or name)
-      const matched = userCourses.find(
-        (c) =>
-          c.code.toUpperCase() === cleanCode.toUpperCase() ||
-          c.name.toLowerCase() === cleanName.toLowerCase() ||
-          (cleanName.length > 5 && c.name.toLowerCase().includes(cleanName.toLowerCase())) ||
-          (c.name.length > 5 && cleanName.toLowerCase().includes(c.name.toLowerCase()))
+      return resolveCourseForUser(
+        sql,
+        userId,
+        courseNameHint || courseName,
+        courseCodeHint || courseCode,
+        userCourses,
+        channelName
       );
-
-      if (matched) return matched.id;
-
-      // 2. Create clean course entry in DB if none matched
-      try {
-        const [newCourse] = await sql`
-          INSERT INTO courses (user_id, code, name, channel_id)
-          VALUES (${userId}::uuid, ${cleanCode.slice(0, 50)}, ${cleanName}, ${channelName || null})
-          RETURNING id, code, name, channel_id
-        `;
-        if (newCourse) {
-          const id = newCourse.id as string;
-          userCourses.push({
-            id,
-            code: newCourse.code as string,
-            name: newCourse.name as string,
-            channel_id: (newCourse.channel_id as string | null) ?? null,
-          });
-          return id;
-        }
-      } catch (err) {
-        console.warn('Could not auto-create course:', err);
-      }
-      return null;
     }
 
     // Initialize tasks array for insertion

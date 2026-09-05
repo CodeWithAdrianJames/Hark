@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 
 // Type definition for Chrome runtime messaging
 declare global {
@@ -20,6 +20,8 @@ declare global {
   }
 }
 
+export type ExtensionSyncStatus = 'IDLE' | 'FETCHING' | 'SUCCESS' | 'NO_TEAMS' | 'ERROR';
+
 export interface HarkExtensionState {
   isInstalled: boolean;
   isChecking: boolean;
@@ -27,8 +29,13 @@ export interface HarkExtensionState {
   extensionId: string;
   version: string | null;
   error: string | null;
+  syncStatus: ExtensionSyncStatus;
+  syncedCount: number;
+  syncMessage: string | null;
+  lastSyncedAt: Date | null;
   pingExtension: (customId?: string) => Promise<boolean>;
   pairUser: (targetUserId: string, customId?: string) => Promise<boolean>;
+  triggerAutoSync: (targetExtId?: string) => Promise<{ status: string; count?: number; message?: string }>;
   setExtensionId: (id: string) => void;
 }
 
@@ -41,6 +48,14 @@ export function useHarkExtension(activeUserId?: string): HarkExtensionState {
   const [isPaired, setIsPaired] = useState<boolean>(false);
   const [version, setVersion] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  // Live MS Teams Global Sync State
+  const [syncStatus, setSyncStatus] = useState<ExtensionSyncStatus>('IDLE');
+  const [syncedCount, setSyncedCount] = useState<number>(0);
+  const [syncMessage, setSyncMessage] = useState<string | null>(null);
+  const [lastSyncedAt, setLastSyncedAt] = useState<Date | null>(null);
+
+  const hasAutoSyncedRef = useRef<boolean>(false);
 
   // Initialize extension ID from env or localStorage
   useEffect(() => {
@@ -116,6 +131,92 @@ export function useHarkExtension(activeUserId?: string): HarkExtensionState {
     [extensionId]
   );
 
+  // Trigger Global MS Teams Assignments Hub Auto-Sync
+  const triggerAutoSync = useCallback(
+    async (targetExtId?: string): Promise<{ status: string; count?: number; message?: string }> => {
+      const activeExtId = (targetExtId || extensionId).trim();
+      if (!activeExtId || typeof window === 'undefined' || !window.chrome?.runtime?.sendMessage) {
+        setSyncStatus('IDLE');
+        return { status: 'ERROR', message: 'Extension not available' };
+      }
+
+      setSyncStatus('FETCHING');
+      setSyncMessage('Syncing all assignments from MS Teams...');
+
+      return new Promise((resolve) => {
+        const timeoutId = setTimeout(() => {
+          setSyncStatus('ERROR');
+          setSyncMessage('Sync request timed out');
+          resolve({ status: 'ERROR', message: 'Sync request timed out' });
+          setTimeout(() => setSyncStatus('IDLE'), 4000);
+        }, 15000);
+
+        try {
+          const apiEndpoint = `${window.location.origin}/api/ingest`;
+          window.chrome!.runtime!.sendMessage(
+            activeExtId,
+            {
+              type: 'HARK_TRIGGER_AUTO_SYNC',
+              userId: activeUserId,
+              apiEndpoint,
+            },
+            (response) => {
+              clearTimeout(timeoutId);
+
+              if (window.chrome?.runtime?.lastError || !response) {
+                const errMsg =
+                  window.chrome?.runtime?.lastError?.message ||
+                  'Could not reach extension background worker.';
+                setSyncStatus('ERROR');
+                setSyncMessage(errMsg);
+                resolve({ status: 'ERROR', message: errMsg });
+                setTimeout(() => setSyncStatus('IDLE'), 4000);
+                return;
+              }
+
+              if (response.status === 'NO_TEAMS') {
+                setSyncStatus('NO_TEAMS');
+                setSyncMessage(response.message || 'Teams not open (Open Teams to sync)');
+                resolve(response);
+                return;
+              }
+
+              if (response.status === 'SUCCESS') {
+                const count = response.count ?? 0;
+                setSyncStatus('SUCCESS');
+                setSyncedCount(count);
+                setSyncMessage(
+                  response.message || `Synced ${count} upcoming assignments across all classes`
+                );
+                setLastSyncedAt(new Date());
+                resolve(response);
+
+                // Auto-fade to IDLE after 4 seconds
+                setTimeout(() => {
+                  setSyncStatus('IDLE');
+                }, 4000);
+                return;
+              }
+
+              setSyncStatus('ERROR');
+              setSyncMessage(response.error || response.message || 'Failed to sync assignments');
+              resolve(response);
+              setTimeout(() => setSyncStatus('IDLE'), 4000);
+            }
+          );
+        } catch (err: unknown) {
+          clearTimeout(timeoutId);
+          const errMsg = err instanceof Error ? err.message : 'Failed to dispatch auto-sync';
+          setSyncStatus('ERROR');
+          setSyncMessage(errMsg);
+          resolve({ status: 'ERROR', message: errMsg });
+          setTimeout(() => setSyncStatus('IDLE'), 4000);
+        }
+      });
+    },
+    [extensionId, activeUserId]
+  );
+
   // Ping extension to check installation
   const pingExtension = useCallback(
     async (targetExtId?: string): Promise<boolean> => {
@@ -137,7 +238,6 @@ export function useHarkExtension(activeUserId?: string): HarkExtensionState {
       setError(null);
 
       return new Promise<boolean>((resolve) => {
-        // Safety timeout to prevent hanging on unresponsive or invalid extension IDs
         const timeoutId = setTimeout(() => {
           setIsChecking(false);
           setIsInstalled(false);
@@ -152,7 +252,11 @@ export function useHarkExtension(activeUserId?: string): HarkExtensionState {
               clearTimeout(timeoutId);
               setIsChecking(false);
 
-              if (window.chrome?.runtime?.lastError || !response || response.status !== 'installed') {
+              if (
+                window.chrome?.runtime?.lastError ||
+                !response ||
+                response.status !== 'installed'
+              ) {
                 setIsInstalled(false);
                 setIsPaired(false);
                 resolve(false);
@@ -194,6 +298,14 @@ export function useHarkExtension(activeUserId?: string): HarkExtensionState {
     }
   }, [activeUserId, isInstalled, extensionId, pairUser]);
 
+  // Trigger auto-sync once installed and paired on load
+  useEffect(() => {
+    if (isInstalled && activeUserId && extensionId && !hasAutoSyncedRef.current) {
+      hasAutoSyncedRef.current = true;
+      triggerAutoSync();
+    }
+  }, [isInstalled, activeUserId, extensionId, triggerAutoSync]);
+
   return {
     isInstalled,
     isChecking,
@@ -201,8 +313,13 @@ export function useHarkExtension(activeUserId?: string): HarkExtensionState {
     extensionId,
     version,
     error,
+    syncStatus,
+    syncedCount,
+    syncMessage,
+    lastSyncedAt,
     pingExtension,
     pairUser,
+    triggerAutoSync,
     setExtensionId,
   };
 }

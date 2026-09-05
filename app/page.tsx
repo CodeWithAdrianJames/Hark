@@ -93,6 +93,13 @@ export default function StudentDashboardPage() {
     fetchTasks(effectiveId);
   }, [fetchTasks]);
 
+  // Auto-refresh task table when cross-tab MS Teams sync succeeds
+  useEffect(() => {
+    if (extensionState.syncStatus === 'SUCCESS') {
+      fetchTasks(userId, true);
+    }
+  }, [extensionState.syncStatus, userId, fetchTasks]);
+
   // Handle switching user ID
   const handleSaveUserId = () => {
     const trimmed = inputUserId.trim();

@@ -323,15 +323,25 @@ export const ExtensionBanner: React.FC<ExtensionBannerProps> = ({
 
 /**
  * ExtensionStatusBadge Component
- * Renders the subtle status indicator in the top navbar:
- * - "● Extension Active & Synced" when installed & connected
- * - Subtle install prompt when not detected
+ * Renders the live status transitions in the top navbar:
+ * - "FETCHING": Pulsing amber/blue spinner pill: "⟳ Syncing all assignments from MS Teams..."
+ * - "SUCCESS": Green pill: "✓ Synced X upcoming assignments across all classes"
+ * - "NO_TEAMS": "● Teams not open (Open Teams to sync)"
+ * - "IDLE": "● Extension Active & Synced"
  */
 export const ExtensionStatusBadge: React.FC<{
   extensionState: HarkExtensionState;
   onOpenSetup?: () => void;
 }> = ({ extensionState, onOpenSetup }) => {
-  const { isInstalled, isPaired, version, isChecking } = extensionState;
+  const {
+    isInstalled,
+    version,
+    isChecking,
+    syncStatus,
+    syncedCount,
+    syncMessage,
+    triggerAutoSync,
+  } = extensionState;
 
   if (isChecking) {
     return (
@@ -342,11 +352,52 @@ export const ExtensionStatusBadge: React.FC<{
     );
   }
 
+  // 1. Live Fetching State
+  if (isInstalled && syncStatus === 'FETCHING') {
+    return (
+      <div className="flex items-center gap-2 px-3 py-1 rounded-lg bg-amber-500/10 border border-amber-500/30 text-[11px] text-amber-300 shadow-md shadow-amber-950/20 animate-pulse">
+        <RefreshCw className="w-3.5 h-3.5 animate-spin text-amber-400" />
+        <span className="font-semibold tracking-tight">
+          Syncing all assignments from MS Teams...
+        </span>
+      </div>
+    );
+  }
+
+  // 2. Live Success State (Auto-fades after 4s)
+  if (isInstalled && syncStatus === 'SUCCESS') {
+    return (
+      <div className="flex items-center gap-2 px-3 py-1 rounded-lg bg-emerald-500/15 border border-emerald-500/30 text-[11px] text-emerald-300 shadow-md shadow-emerald-950/20 animate-in fade-in zoom-in-95 duration-200">
+        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 flex-shrink-0" />
+        <span className="font-semibold tracking-tight">
+          ✓ Synced {syncedCount} upcoming assignment{syncedCount === 1 ? '' : 's'} across all classes
+        </span>
+      </div>
+    );
+  }
+
+  // 3. Teams Not Open State
+  if (isInstalled && syncStatus === 'NO_TEAMS') {
+    return (
+      <button
+        onClick={() => triggerAutoSync()}
+        title="MS Teams is not open in any active browser tabs. Open Teams and click to sync."
+        className="flex items-center gap-2 px-2.5 py-1 rounded-lg bg-slate-900 hover:bg-slate-800/90 border border-slate-700/60 text-[11px] text-slate-300 hover:text-white transition-all active:scale-95"
+      >
+        <span className="w-2 h-2 rounded-full bg-amber-400 flex-shrink-0" />
+        <span className="font-medium tracking-tight">
+          Teams not open (Open Teams to sync)
+        </span>
+      </button>
+    );
+  }
+
+  // 4. Default Idle Installed & Synced State
   if (isInstalled) {
     return (
       <div
         className="flex items-center gap-2 px-2.5 py-1 rounded-lg bg-emerald-500/10 border border-emerald-500/25 text-[11px] text-emerald-400 shadow-xs"
-        title={`Hark Extension v${version || '1.0.0'} is active and synchronized.`}
+        title={`Hark Extension v${version || '1.0.0'} active. Click sync button to fetch MS Teams assignments.`}
       >
         <span className="relative flex h-2 w-2">
           <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
@@ -355,6 +406,13 @@ export const ExtensionStatusBadge: React.FC<{
         <span className="font-medium tracking-tight">
           Extension Active &amp; Synced
         </span>
+        <button
+          onClick={() => triggerAutoSync()}
+          title="Re-sync assignments across all Teams classes now"
+          className="ml-1 p-0.5 hover:bg-emerald-500/20 rounded text-emerald-400 hover:text-emerald-200 transition-colors"
+        >
+          <RefreshCw className="w-3 h-3" />
+        </button>
       </div>
     );
   }

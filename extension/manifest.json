@@ -4,10 +4,13 @@
   "version": "1.0.0",
   "description": "Companion Chrome Extension for Hark academic assignment tracking and message ingestion from Microsoft Teams.",
   "permissions": [
-    "storage"
+    "storage",
+    "tabs"
   ],
   "host_permissions": [
     "https://teams.microsoft.com/*",
+    "https://*.assignments.onenote.com/*",
+    "https://*.assignments.microsoft.com/*",
     "http://localhost:3000/*",
     "https://*/*"
   ],
@@ -29,12 +32,15 @@
   "content_scripts": [
     {
       "matches": [
-        "https://teams.microsoft.com/*"
+        "https://teams.microsoft.com/*",
+        "https://*.assignments.onenote.com/*",
+        "https://*.assignments.microsoft.com/*"
       ],
       "js": [
         "content.js"
       ],
-      "run_at": "document_start"
+      "all_frames": true,
+      "run_at": "document_idle"
     }
   ],
   "web_accessible_resources": [
