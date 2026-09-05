@@ -54,6 +54,7 @@ async function verify() {
       c.code AS course_code,
       c.name AS course_name,
       t.due_date,
+      t.source_url,
       t.raw_message_hash,
       t.source_type
     FROM tasks t
@@ -127,6 +128,11 @@ async function verify() {
   console.log(`12. RESEARCH ASSIGNMENT due Sep 12 11:59 PM: ${checkResearchDate ? 'PASSED ✅' : 'FAILED ❌'}`);
   console.log(`13. Party Attendance due Sep 13 11:59 PM: ${checkPartyAttDate ? 'PASSED ✅' : 'FAILED ❌'}`);
   console.log(`14. Party Bonus due Sep 30 11:59 PM: ${checkPartyBonusDate ? 'PASSED ✅' : 'FAILED ❌'}`);
+
+  const checkSpecificLinks = tasks.every(
+    (t) => t.source_url && !t.source_url.endsWith('/classes/all/list')
+  );
+  console.log(`15. All 6 tasks have specific deep links (not generic list): ${checkSpecificLinks ? 'PASSED ✅' : 'FAILED ❌'}`);
 
   // 2. Test Canonical Ingest Upsert: Re-simulate incoming sync with adjusted dates/descriptions
   console.log('\n--- Testing Re-scan Idempotency & In-place Upsert ---');
@@ -222,10 +228,11 @@ async function verify() {
     checkResearchDate &&
     checkPartyAttDate &&
     checkPartyBonusDate &&
+    checkSpecificLinks &&
     checkUpsert &&
     finalCount === 6
   ) {
-    console.log('\n🎉 ALL 16 ASSERTIONS PASSED! Database is perfectly aligned with zero duplicate cards.');
+    console.log('\n🎉 ALL 17 ASSERTIONS PASSED! Database is perfectly aligned with specific deep links and zero duplicate cards.');
   } else {
     console.error('\n❌ Some assertions failed.');
     process.exit(1);

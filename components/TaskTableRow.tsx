@@ -45,7 +45,11 @@ export const TaskTableRow: React.FC<TaskTableRowProps> = ({
     course_code: task.course_code,
   });
 
-  const teamsUrl = formatTeamsDeepLink(task.source_url);
+  const effectiveLink = task.deep_link || task.source_url;
+  const teamsUrl = formatTeamsDeepLink(effectiveLink, {
+    title: task.title,
+    course_code: task.course_code || undefined,
+  });
 
   // Dynamic urgency badge colors based on requirements:
   // Red: Due today

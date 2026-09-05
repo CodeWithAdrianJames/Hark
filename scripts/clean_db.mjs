@@ -49,7 +49,7 @@ function computeCanonicalTaskHash(userId, courseCode, title) {
 
 const REAL_DELIVERABLES = [
   {
-    titlePattern: '4_quiz',
+    titlePattern: '4 quiz',
     canonicalTitle: '4_Quiz (c/o CodeChum)',
     courseCode: 'CSIT321G1',
     courseBadge: '[CSIT321G1]',
@@ -57,7 +57,7 @@ const REAL_DELIVERABLES = [
     rawDueString: 'Sep 7, 2026 1:00 AM',
   },
   {
-    titlePattern: '5_prelim',
+    titlePattern: '5 prelim',
     canonicalTitle: '5_Prelim Exam',
     courseCode: 'CSIT321G1',
     courseBadge: '[CSIT321G1]',
@@ -185,10 +185,18 @@ async function runClean() {
           'Extracted from MS Teams EDU Assignments Hub',
           ${def.canonicalDueIso}::timestamptz,
           'official_assignment',
-          'https://assignments.edu.cloud.microsoft/classes/all/list',
+          ${`https://teams.microsoft.com/l/entity/2a84b049-50bc-4535-a646-5677a8207868/assignments?context=${encodeURIComponent(
+            JSON.stringify({ title: def.canonicalTitle, course: def.courseCode })
+          )}`},
           ${canonicalHash},
           'pending'
         )
+        ON CONFLICT (raw_message_hash)
+        DO UPDATE SET
+          title = EXCLUDED.title,
+          source_url = EXCLUDED.source_url,
+          due_date = EXCLUDED.due_date,
+          updated_at = NOW()
         RETURNING id;
       `;
       if (inserted) preservedTaskIds.add(inserted.id);
@@ -212,13 +220,21 @@ async function runClean() {
         }
       }
 
-      // Update best match to canonical due date, course, and hash
+      const currentUrl = bestMatch.source_url || '';
+      const finalUrl = (!currentUrl || currentUrl.endsWith('/classes/all/list'))
+        ? `https://teams.microsoft.com/l/entity/2a84b049-50bc-4535-a646-5677a8207868/assignments?context=${encodeURIComponent(
+            JSON.stringify({ title: def.canonicalTitle, course: def.courseCode })
+          )}`
+        : currentUrl;
+
+      // Update best match to canonical due date, course, specific deep link, and hash
       await sql`
         UPDATE tasks
         SET
           title = ${def.canonicalTitle},
           due_date = ${def.canonicalDueIso}::timestamptz,
           course_id = ${courseId || bestMatch.course_id},
+          source_url = ${finalUrl},
           raw_message_hash = ${canonicalHash},
           updated_at = NOW()
         WHERE id = ${bestMatch.id}::uuid;
