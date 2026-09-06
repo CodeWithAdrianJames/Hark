@@ -55,7 +55,8 @@ const REAL_DELIVERABLES = [
     courseBadge: '[CSIT321G1]',
     canonicalDueIso: '2026-09-06T17:00:00.000Z', // Sep 7, 2026, 1:00 AM (UTC+8)
     rawDueString: 'Sep 7, 2026 1:00 AM',
-    portalUrl: 'https://assignments.edu.cloud.microsoft/classes/e92c366c-8175-4790-bc7f-826dc42f0e14/assignments/abf580cd-830a-41f4-b7b0-4af1e96104df',
+    assignmentId: 'abf580cd-830a-41f4-b7b0-4af1e96104df',
+    portalUrl: 'https://teams.microsoft.com/_#/assignments/',
   },
   {
     titlePattern: '5 prelim',
@@ -182,6 +183,7 @@ async function runClean() {
           source_type,
           source_url,
           deep_link,
+          assignment_id,
           raw_message_hash,
           status
         )
@@ -192,13 +194,15 @@ async function runClean() {
           'Extracted from MS Teams EDU Assignments Hub',
           ${def.canonicalDueIso}::timestamptz,
           'official_assignment',
-          ${def.portalUrl || 'https://teams.microsoft.com/_#/assignments/'},
-          ${def.portalUrl || 'https://teams.microsoft.com/_#/assignments/'},
+          'https://teams.microsoft.com/_#/assignments/',
+          'https://teams.microsoft.com/_#/assignments/',
+          ${def.assignmentId || null},
           ${canonicalHash},
           'pending'
         )
         ON CONFLICT (raw_message_hash)
         DO UPDATE SET
+          assignment_id = EXCLUDED.assignment_id,
           title = EXCLUDED.title,
           source_url = EXCLUDED.source_url,
           deep_link = EXCLUDED.deep_link,
@@ -227,22 +231,16 @@ async function runClean() {
         }
       }
 
-      const currentUrl = bestMatch.source_url || bestMatch.deep_link || '';
-      const isInvalid = !currentUrl ||
-        currentUrl.endsWith('/classes/all/list') ||
-        currentUrl.endsWith('/classes/all/list/') ||
-        currentUrl.includes('/assignments?context=');
-      const finalUrl = isInvalid
-        ? (def.portalUrl || 'https://teams.microsoft.com/_#/assignments/')
-        : currentUrl;
+      const finalUrl = 'https://teams.microsoft.com/_#/assignments/';
 
-      // Update best match to canonical due date, course, specific deep link, and hash
+      // Update best match to canonical due date, course, assignment_id, universal deep link, and hash
       await sql`
         UPDATE tasks
         SET
           title = ${def.canonicalTitle},
           due_date = ${def.canonicalDueIso}::timestamptz,
           course_id = ${courseId || bestMatch.course_id},
+          assignment_id = ${def.assignmentId || bestMatch.assignment_id || null},
           source_url = ${finalUrl},
           deep_link = ${finalUrl},
           raw_message_hash = ${canonicalHash},

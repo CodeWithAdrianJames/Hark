@@ -40,6 +40,7 @@ export async function GET(req: NextRequest) {
         t.id,
         t.user_id,
         t.course_id,
+        t.assignment_id,
         t.title,
         t.description,
         t.due_date,

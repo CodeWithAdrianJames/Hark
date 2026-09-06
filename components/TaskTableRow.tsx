@@ -45,19 +45,42 @@ export const TaskTableRow: React.FC<TaskTableRowProps> = ({
     course_code: task.course_code,
   });
 
-  // Effective deep link resolution with clean fallback to https://teams.microsoft.com/_#/assignments/
-  const rawDeepLink = (task.deep_link || (task as any).deepLink || task.source_url || '').trim();
-  const isInvalidDeepLink =
-    !rawDeepLink ||
-    rawDeepLink === '#' ||
-    rawDeepLink.startsWith('javascript:') ||
-    rawDeepLink.endsWith('/classes/all/list') ||
-    rawDeepLink.endsWith('/classes/all/list/') ||
-    /^https?:\/\/[^/]+\/classes\/all\/list(?:\?|$)/i.test(rawDeepLink);
+  // Handler to bridge assignment navigation to Hark Chrome Extension or fallback cleanly
+  const handleOpenInTeams = (e: React.MouseEvent<HTMLAnchorElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
 
-  const effectiveDeepLink = isInvalidDeepLink
-    ? 'https://teams.microsoft.com/_#/assignments/'
-    : rawDeepLink;
+    const extensionId =
+      process.env.NEXT_PUBLIC_HARK_EXTENSION_ID?.trim() ||
+      (typeof window !== 'undefined' ? localStorage.getItem('hark_local_extension_id')?.trim() : '') ||
+      '';
+
+    const fallbackUrl = 'https://teams.microsoft.com/_#/assignments/';
+
+    if (
+      typeof window !== 'undefined' &&
+      window.chrome?.runtime?.sendMessage &&
+      extensionId
+    ) {
+      try {
+        window.chrome.runtime.sendMessage(
+          extensionId,
+          {
+            type: 'NAVIGATE_TO_ASSIGNMENT',
+            assignmentId: task.assignment_id || null,
+            title: task.title,
+          },
+          (response) => {
+            if (window.chrome?.runtime?.lastError || !response?.success) {
+              window.open(fallbackUrl, '_blank', 'noopener,noreferrer');
+            }
+          }
+        );
+      } catch {
+        window.open(fallbackUrl, '_blank', 'noopener,noreferrer');
+      }
+    }
+  };
 
   // Dynamic urgency badge colors based on requirements:
   // Red: Due today
@@ -224,15 +247,12 @@ export const TaskTableRow: React.FC<TaskTableRowProps> = ({
           <div className="flex items-center justify-end gap-1.5">
             {/* Open in Teams / Portal */}
             <a
-              href={effectiveDeepLink}
+              href="https://teams.microsoft.com/_#/assignments/"
               target="_blank"
               rel="noopener noreferrer"
               className="inline-flex items-center justify-center p-1.5 rounded-lg bg-slate-800/80 hover:bg-indigo-600 text-slate-300 hover:text-white border border-slate-700/60 hover:border-indigo-500 transition-all shadow-xs"
               title="Open Assignment in Teams / Portal"
-              onClick={(e) => {
-                // Allow standard new-tab navigation without preventDefault interfering
-                e.stopPropagation();
-              }}
+              onClick={handleOpenInTeams}
             >
               <ExternalLink className="w-3.5 h-3.5" />
             </a>

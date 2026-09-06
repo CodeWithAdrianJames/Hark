@@ -168,14 +168,7 @@ async function performDatabaseClean(targetUserId: string) {
       // Update best match to canonical due date, course, canonical hash, and specific deep link
       const canonicalHash = computeCanonicalTaskHash(targetUserId, def.courseCode, def.canonicalTitle);
       const courseId = courseMap.get(normalizeCourseCode(def.courseCode)) || bestMatch.course_id;
-      const currentUrl = bestMatch.source_url || (bestMatch as any).deep_link || '';
-      const isInvalid = !currentUrl ||
-        currentUrl.endsWith('/classes/all/list') ||
-        currentUrl.endsWith('/classes/all/list/') ||
-        currentUrl.includes('/assignments?context=');
-      const finalUrl = isInvalid
-        ? (def.portalUrl || 'https://teams.microsoft.com/_#/assignments/')
-        : currentUrl;
+      const finalUrl = 'https://teams.microsoft.com/_#/assignments/';
 
       await sql`
         UPDATE tasks
@@ -183,6 +176,7 @@ async function performDatabaseClean(targetUserId: string) {
           title = ${def.canonicalTitle},
           due_date = ${def.canonicalDueIso}::timestamptz,
           course_id = ${courseId},
+          assignment_id = ${def.assignmentId || (bestMatch as any).assignment_id || null},
           source_url = ${finalUrl},
           deep_link = ${finalUrl},
           raw_message_hash = ${canonicalHash},

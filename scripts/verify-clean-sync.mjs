@@ -55,6 +55,8 @@ async function verify() {
       c.name AS course_name,
       t.due_date,
       t.source_url,
+      t.deep_link,
+      t.assignment_id,
       t.raw_message_hash,
       t.source_type
     FROM tasks t
@@ -68,6 +70,8 @@ async function verify() {
     tasks.map((t) => ({
       Title: t.title,
       CourseBadge: `[${t.course_code}]`,
+      AssignmentId: t.assignment_id || 'null',
+      DeepLink: t.deep_link || t.source_url,
       DueDateUTC: t.due_date,
       HashPrefix: t.raw_message_hash?.slice(0, 10),
     }))
@@ -130,9 +134,12 @@ async function verify() {
   console.log(`14. Party Bonus due Sep 30 11:59 PM: ${checkPartyBonusDate ? 'PASSED ✅' : 'FAILED ❌'}`);
 
   const checkSpecificLinks = tasks.every(
-    (t) => t.source_url && !t.source_url.endsWith('/classes/all/list')
+    (t) => (t.deep_link || t.source_url) && !(t.deep_link || t.source_url).endsWith('/classes/all/list')
   );
-  console.log(`15. All 6 tasks have specific deep links (not generic list): ${checkSpecificLinks ? 'PASSED ✅' : 'FAILED ❌'}`);
+  console.log(`15. All 6 tasks have valid deep links (not generic list): ${checkSpecificLinks ? 'PASSED ✅' : 'FAILED ❌'}`);
+
+  const checkQuizAssignmentId = quiz?.assignment_id === 'abf580cd-830a-41f4-b7b0-4af1e96104df';
+  console.log(`16. 4_Quiz assignmentId captured correctly: ${checkQuizAssignmentId ? 'PASSED ✅' : 'FAILED ❌'}`);
 
   // 2. Test Canonical Ingest Upsert: Re-simulate incoming sync with adjusted dates/descriptions
   console.log('\n--- Testing Re-scan Idempotency & In-place Upsert ---');
@@ -141,6 +148,7 @@ async function verify() {
       title: '4_Quiz (c/o CodeChum)',
       courseCode: 'CSIT321G1',
       dueIso: '2026-09-06T17:00:00.000Z',
+      assignmentId: 'abf580cd-830a-41f4-b7b0-4af1e96104df',
     },
     {
       title: '5_Prelim Exam',
@@ -180,6 +188,9 @@ async function verify() {
         title,
         due_date,
         source_type,
+        deep_link,
+        source_url,
+        assignment_id,
         raw_message_hash,
         status
       )
@@ -188,11 +199,16 @@ async function verify() {
         ${item.title},
         ${item.dueIso}::timestamptz,
         'official_assignment',
+        'https://teams.microsoft.com/_#/assignments/',
+        'https://teams.microsoft.com/_#/assignments/',
+        ${item.assignmentId || null},
         ${rawHash},
         'pending'
       )
-      ON CONFLICT (raw_message_hash)
+      ON CONFLICT (user_id, raw_message_hash)
       DO UPDATE SET
+        assignment_id = EXCLUDED.assignment_id,
+        deep_link = EXCLUDED.deep_link,
         title = EXCLUDED.title,
         due_date = EXCLUDED.due_date,
         updated_at = NOW()
@@ -205,13 +221,13 @@ async function verify() {
 
   console.log(`Re-scan results: ${insertCount} inserted, ${updateCount} updated in-place.`);
   const checkUpsert = insertCount === 0 && updateCount === 6;
-  console.log(`15. Zero duplicate insertions on re-scan: ${checkUpsert ? 'PASSED ✅' : 'FAILED ❌'}`);
+  console.log(`17. Zero duplicate insertions on re-scan: ${checkUpsert ? 'PASSED ✅' : 'FAILED ❌'}`);
 
   const postSyncTasks = await sql`
     SELECT COUNT(*)::int as count FROM tasks WHERE user_id = ${TARGET_USER_ID}::uuid;
   `;
   const finalCount = postSyncTasks[0]?.count;
-  console.log(`16. Final task count remains exactly 6: ${finalCount === 6 ? 'PASSED ✅' : 'FAILED ❌'}`);
+  console.log(`18. Final task count remains exactly 6: ${finalCount === 6 ? 'PASSED ✅' : 'FAILED ❌'}`);
 
   if (
     check1 &&
@@ -229,10 +245,11 @@ async function verify() {
     checkPartyAttDate &&
     checkPartyBonusDate &&
     checkSpecificLinks &&
+    checkQuizAssignmentId &&
     checkUpsert &&
     finalCount === 6
   ) {
-    console.log('\n🎉 ALL 17 ASSERTIONS PASSED! Database is perfectly aligned with specific deep links and zero duplicate cards.');
+    console.log('\n🎉 ALL 18 ASSERTIONS PASSED! Database is perfectly aligned with assignment IDs, tenant-agnostic links, and zero duplicate cards.');
   } else {
     console.error('\n❌ Some assertions failed.');
     process.exit(1);

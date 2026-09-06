@@ -93,6 +93,7 @@ export interface RealDeliverableDefinition {
   canonicalDueIso: string;
   rawDueString: string;
   portalUrl?: string;
+  assignmentId?: string;
 }
 
 export const REAL_DELIVERABLES: RealDeliverableDefinition[] = [
@@ -103,7 +104,8 @@ export const REAL_DELIVERABLES: RealDeliverableDefinition[] = [
     courseBadge: '[CSIT321G1]',
     canonicalDueIso: '2026-09-06T17:00:00.000Z', // Sep 7, 2026, 1:00 AM (UTC+8)
     rawDueString: 'Sep 7, 2026 1:00 AM',
-    portalUrl: 'https://assignments.edu.cloud.microsoft/classes/e92c366c-8175-4790-bc7f-826dc42f0e14/assignments/abf580cd-830a-41f4-b7b0-4af1e96104df',
+    assignmentId: 'abf580cd-830a-41f4-b7b0-4af1e96104df',
+    portalUrl: 'https://teams.microsoft.com/_#/assignments/',
   },
   {
     titlePattern: '5 prelim',

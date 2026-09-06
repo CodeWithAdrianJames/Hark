@@ -658,6 +658,9 @@ export async function POST(req: NextRequest) {
     // =========================================================================
     if (Array.isArray(body.assignments)) {
       const assignments = body.assignments as Array<{
+        assignmentId?: string;
+        assignment_id?: string;
+        id?: string;
         title?: string;
         courseName?: string;
         courseCode?: string;
@@ -737,13 +740,16 @@ export async function POST(req: NextRequest) {
         // unique_hash = sha256(`${userId}_${courseCode}_${normalizedTitle}`)
         const rawHash = computeCanonicalTaskHash(userId, cleanCode, title);
 
-        const deepLink = (
-          item.deepLink ||
-          (item as any).deep_link ||
-          (item as any).directPortalUrl ||
-          (item as any).source_url ||
+        // Extract assignmentId (UUID from the card element)
+        const assignmentId = (
+          item.assignmentId ||
+          (item as any).assignment_id ||
+          (item as any).id ||
           ''
         ).trim() || null;
+
+        // Universal tenant-agnostic fallback for deep_link:
+        const deepLink = 'https://teams.microsoft.com/_#/assignments/';
         const description = item.description?.trim() || null;
 
         const result = await sql`
@@ -751,6 +757,7 @@ export async function POST(req: NextRequest) {
             user_id,
             course_id,
             course_name,
+            assignment_id,
             title,
             description,
             due_date,
@@ -767,6 +774,7 @@ export async function POST(req: NextRequest) {
             ${userId}::uuid,
             ${courseId ? courseId : null},
             ${cleanName},
+            ${assignmentId},
             ${title},
             ${description},
             ${dueDateIso}::timestamptz,
@@ -781,6 +789,7 @@ export async function POST(req: NextRequest) {
           )
           ON CONFLICT (user_id, raw_message_hash)
           DO UPDATE SET
+            assignment_id = EXCLUDED.assignment_id,
             deep_link = EXCLUDED.deep_link,
             title = EXCLUDED.title,
             course_name = EXCLUDED.course_name,
@@ -789,7 +798,7 @@ export async function POST(req: NextRequest) {
             description = COALESCE(EXCLUDED.description, tasks.description),
             source_url = EXCLUDED.deep_link,
             updated_at = NOW()
-          RETURNING (xmax = 0) AS is_insert, id, title, due_date, source_url, deep_link;
+          RETURNING (xmax = 0) AS is_insert, id, title, due_date, source_url, deep_link, assignment_id;
         `;
 
         if (result && result.length > 0) {
@@ -812,6 +821,7 @@ export async function POST(req: NextRequest) {
           t.id,
           t.user_id,
           t.course_id,
+          t.assignment_id,
           t.title,
           t.description,
           t.due_date,

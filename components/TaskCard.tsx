@@ -23,6 +23,7 @@ export interface TaskItem {
   source_type: 'official_assignment' | 'chat_announcement' | string;
   source_url: string | null;
   deep_link?: string | null;
+  assignment_id?: string | null;
   raw_message_hash: string | null;
   status: 'pending' | 'in_progress' | 'completed';
   created_at: string;
@@ -161,29 +162,51 @@ export const TaskCard: React.FC<TaskCardProps> = ({
       {/* Bottom Action Buttons: Deep Link + Calendar Intent */}
       <div className="flex items-center justify-between pt-3 border-t border-slate-800/80 mt-auto gap-2">
         {(() => {
-          const rawDeepLink = (task.deep_link || (task as any).deepLink || task.source_url || '').trim();
-          const isInvalidDeepLink =
-            !rawDeepLink ||
-            rawDeepLink === '#' ||
-            rawDeepLink.startsWith('javascript:') ||
-            rawDeepLink.endsWith('/classes/all/list') ||
-            rawDeepLink.endsWith('/classes/all/list/') ||
-            /^https?:\/\/[^/]+\/classes\/all\/list(?:\?|$)/i.test(rawDeepLink);
+          const handleOpenInTeams = (e: React.MouseEvent<HTMLAnchorElement>) => {
+            e.preventDefault();
+            e.stopPropagation();
 
-          const effectiveDeepLink = isInvalidDeepLink
-            ? 'https://teams.microsoft.com/_#/assignments/'
-            : rawDeepLink;
+            const extensionId =
+              process.env.NEXT_PUBLIC_HARK_EXTENSION_ID?.trim() ||
+              (typeof window !== 'undefined' ? localStorage.getItem('hark_local_extension_id')?.trim() : '') ||
+              '';
+
+            const fallbackUrl = 'https://teams.microsoft.com/_#/assignments/';
+
+            if (
+              typeof window !== 'undefined' &&
+              window.chrome?.runtime?.sendMessage &&
+              extensionId
+            ) {
+              try {
+                window.chrome.runtime.sendMessage(
+                  extensionId,
+                  {
+                    type: 'NAVIGATE_TO_ASSIGNMENT',
+                    assignmentId: task.assignment_id || null,
+                    title: task.title,
+                  },
+                  (response) => {
+                    if (window.chrome?.runtime?.lastError || !response?.success) {
+                      window.open(fallbackUrl, '_blank', 'noopener,noreferrer');
+                    }
+                  }
+                );
+              } catch {
+                window.open(fallbackUrl, '_blank', 'noopener,noreferrer');
+              }
+            } else {
+              window.open(fallbackUrl, '_blank', 'noopener,noreferrer');
+            }
+          };
 
           return (
             <a
-              href={effectiveDeepLink}
+              href="https://teams.microsoft.com/_#/assignments/"
               target="_blank"
               rel="noopener noreferrer"
               title="Open Assignment in Teams / Portal"
-              onClick={(e) => {
-                // Allow standard new-tab navigation without preventDefault interfering
-                e.stopPropagation();
-              }}
+              onClick={handleOpenInTeams}
               className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-400 hover:text-indigo-300 transition-colors group/link"
             >
               <ExternalLink className="w-3.5 h-3.5 group-hover/link:translate-x-0.5 transition-transform" />
