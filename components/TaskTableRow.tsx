@@ -45,11 +45,19 @@ export const TaskTableRow: React.FC<TaskTableRowProps> = ({
     course_code: task.course_code,
   });
 
-  const effectiveLink = task.deep_link || task.source_url;
-  const teamsUrl = formatTeamsDeepLink(effectiveLink, {
-    title: task.title,
-    course_code: task.course_code || undefined,
-  });
+  // Effective deep link resolution with clean fallback to https://teams.microsoft.com/_#/assignments/
+  const rawDeepLink = (task.deep_link || (task as any).deepLink || task.source_url || '').trim();
+  const isInvalidDeepLink =
+    !rawDeepLink ||
+    rawDeepLink === '#' ||
+    rawDeepLink.startsWith('javascript:') ||
+    rawDeepLink.endsWith('/classes/all/list') ||
+    rawDeepLink.endsWith('/classes/all/list/') ||
+    /^https?:\/\/[^/]+\/classes\/all\/list(?:\?|$)/i.test(rawDeepLink);
+
+  const effectiveDeepLink = isInvalidDeepLink
+    ? 'https://teams.microsoft.com/_#/assignments/'
+    : rawDeepLink;
 
   // Dynamic urgency badge colors based on requirements:
   // Red: Due today
@@ -214,13 +222,17 @@ export const TaskTableRow: React.FC<TaskTableRowProps> = ({
         {/* 6. Actions: Open in Teams + Google Calendar */}
         <td className="py-3 px-3.5 whitespace-nowrap text-right align-middle w-28">
           <div className="flex items-center justify-end gap-1.5">
-            {/* Open in Teams */}
+            {/* Open in Teams / Portal */}
             <a
-              href={task.deep_link || (task as any).deepLink || teamsUrl || '#'}
+              href={effectiveDeepLink}
               target="_blank"
               rel="noopener noreferrer"
-              title="Open assignment in Teams"
               className="inline-flex items-center justify-center p-1.5 rounded-lg bg-slate-800/80 hover:bg-indigo-600 text-slate-300 hover:text-white border border-slate-700/60 hover:border-indigo-500 transition-all shadow-xs"
+              title="Open Assignment in Teams / Portal"
+              onClick={(e) => {
+                // Allow standard new-tab navigation without preventDefault interfering
+                e.stopPropagation();
+              }}
             >
               <ExternalLink className="w-3.5 h-3.5" />
             </a>

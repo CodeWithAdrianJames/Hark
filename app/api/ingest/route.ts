@@ -699,8 +699,10 @@ export async function POST(req: NextRequest) {
           DELETE FROM tasks
           WHERE user_id = ${userId}::uuid
             AND (
-              deep_link LIKE '%/classes/all/list'
-              OR source_url LIKE '%/classes/all/list'
+              deep_link LIKE '%/classes/all/list%'
+              OR source_url LIKE '%/classes/all/list%'
+              OR deep_link LIKE '%/assignments?context=%'
+              OR source_url LIKE '%/assignments?context=%'
             );
         `;
       }
@@ -735,7 +737,13 @@ export async function POST(req: NextRequest) {
         // unique_hash = sha256(`${userId}_${courseCode}_${normalizedTitle}`)
         const rawHash = computeCanonicalTaskHash(userId, cleanCode, title);
 
-        const deepLink = (item.deepLink || (item as any).deep_link || (item as any).source_url || '').trim() || null;
+        const deepLink = (
+          item.deepLink ||
+          (item as any).deep_link ||
+          (item as any).directPortalUrl ||
+          (item as any).source_url ||
+          ''
+        ).trim() || null;
         const description = item.description?.trim() || null;
 
         const result = await sql`

@@ -205,24 +205,16 @@ export function parseDueDate(dueDateString: string, timezone = 'Asia/Manila'): F
 export function formatTeamsDeepLink(
   url: string | null | undefined,
   hint?: { title?: string; course_code?: string }
-): string | null {
+): string {
+  const defaultFallback = 'https://teams.microsoft.com/_#/assignments/';
+
   if (!url || typeof url !== 'string') {
-    if (hint?.title) {
-      return `https://teams.microsoft.com/l/entity/2a84b049-50bc-4535-a646-5677a8207868/assignments?context=${encodeURIComponent(
-        JSON.stringify({ title: hint.title, course: hint.course_code || '' })
-      )}`;
-    }
-    return null;
+    return defaultFallback;
   }
 
   let formatted = url.trim();
   if (!formatted || formatted === '#' || formatted.startsWith('javascript:')) {
-    if (hint?.title) {
-      return `https://teams.microsoft.com/l/entity/2a84b049-50bc-4535-a646-5677a8207868/assignments?context=${encodeURIComponent(
-        JSON.stringify({ title: hint.title, course: hint.course_code || '' })
-      )}`;
-    }
-    return null;
+    return defaultFallback;
   }
 
   if (formatted.startsWith('//')) {
@@ -237,23 +229,21 @@ export function formatTeamsDeepLink(
     formatted = 'https://' + formatted;
   }
 
-  // If it's a specific assignment route, return it directly
-  if (/\/assignments\/[a-zA-Z0-9_\-]+/i.test(formatted)) {
+  // If it's a specific assignment route or portal URL, return it directly
+  if (
+    /\/assignments\/[a-zA-Z0-9_\-]+/i.test(formatted) ||
+    /assignments\.edu\.cloud\.microsoft\/classes\/[^/]+\/assignments\/[^/]+/i.test(formatted)
+  ) {
     return formatted;
   }
 
-  // If the link points to the generic /classes/all/list, fallback to MS Teams assignments entity with title/course hint
+  // If the link points to the generic /classes/all/list, fallback to MS Teams assignments
   if (
     formatted.endsWith('/classes/all/list') ||
     formatted.endsWith('/classes/all/list/') ||
     /^https?:\/\/[^/]+\/classes\/all\/list(?:\?|$)/i.test(formatted)
   ) {
-    if (hint?.title) {
-      return `https://teams.microsoft.com/l/entity/2a84b049-50bc-4535-a646-5677a8207868/assignments?context=${encodeURIComponent(
-        JSON.stringify({ title: hint.title, course: hint.course_code || '' })
-      )}`;
-    }
-    return 'https://teams.microsoft.com/_#/assignments';
+    return defaultFallback;
   }
 
   return formatted;

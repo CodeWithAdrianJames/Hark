@@ -55,6 +55,7 @@ const REAL_DELIVERABLES = [
     courseBadge: '[CSIT321G1]',
     canonicalDueIso: '2026-09-06T17:00:00.000Z', // Sep 7, 2026, 1:00 AM (UTC+8)
     rawDueString: 'Sep 7, 2026 1:00 AM',
+    portalUrl: 'https://assignments.edu.cloud.microsoft/classes/e92c366c-8175-4790-bc7f-826dc42f0e14/assignments/abf580cd-830a-41f4-b7b0-4af1e96104df',
   },
   {
     titlePattern: '5 prelim',
@@ -63,6 +64,7 @@ const REAL_DELIVERABLES = [
     courseBadge: '[CSIT321G1]',
     canonicalDueIso: '2026-09-06T17:30:00.000Z', // Sep 7, 2026, 1:30 AM (UTC+8)
     rawDueString: 'Sep 7, 2026 1:30 AM',
+    portalUrl: 'https://teams.microsoft.com/_#/assignments/',
   },
   {
     titlePattern: 'final proposal',
@@ -71,6 +73,7 @@ const REAL_DELIVERABLES = [
     courseBadge: '[IT317]',
     canonicalDueIso: '2026-09-08T15:59:59.000Z', // Sep 8, 2026, 11:59 PM (UTC+8)
     rawDueString: 'Sep 8, 2026 11:59 PM',
+    portalUrl: 'https://teams.microsoft.com/_#/assignments/',
   },
   {
     titlePattern: 'research assignment',
@@ -79,6 +82,7 @@ const REAL_DELIVERABLES = [
     courseBadge: '[IT365]',
     canonicalDueIso: '2026-09-12T15:59:59.000Z', // Sep 12, 2026, 11:59 PM (UTC+8)
     rawDueString: 'Sep 12, 2026 11:59 PM',
+    portalUrl: 'https://teams.microsoft.com/_#/assignments/',
   },
   {
     titlePattern: 'acquaintance party attendance',
@@ -87,6 +91,7 @@ const REAL_DELIVERABLES = [
     courseBadge: '[CSIT321G1]',
     canonicalDueIso: '2026-09-13T15:59:59.000Z', // Sep 13, 2026, 11:59 PM (UTC+8)
     rawDueString: 'Sep 13, 2026 11:59 PM',
+    portalUrl: 'https://teams.microsoft.com/_#/assignments/',
   },
   {
     titlePattern: 'acquaintance party bonus',
@@ -95,6 +100,7 @@ const REAL_DELIVERABLES = [
     courseBadge: '[IT317]',
     canonicalDueIso: '2026-09-30T15:59:59.000Z', // Sep 30, 2026, 11:59 PM (UTC+8)
     rawDueString: 'Sep 30, 2026 11:59 PM',
+    portalUrl: 'https://teams.microsoft.com/_#/assignments/',
   },
 ];
 
@@ -186,12 +192,8 @@ async function runClean() {
           'Extracted from MS Teams EDU Assignments Hub',
           ${def.canonicalDueIso}::timestamptz,
           'official_assignment',
-          ${`https://teams.microsoft.com/l/entity/2a84b049-50bc-4535-a646-5677a8207868/assignments?context=${encodeURIComponent(
-            JSON.stringify({ title: def.canonicalTitle, course: def.courseCode })
-          )}`},
-          ${`https://teams.microsoft.com/l/entity/2a84b049-50bc-4535-a646-5677a8207868/assignments?context=${encodeURIComponent(
-            JSON.stringify({ title: def.canonicalTitle, course: def.courseCode })
-          )}`},
+          ${def.portalUrl || 'https://teams.microsoft.com/_#/assignments/'},
+          ${def.portalUrl || 'https://teams.microsoft.com/_#/assignments/'},
           ${canonicalHash},
           'pending'
         )
@@ -225,11 +227,13 @@ async function runClean() {
         }
       }
 
-      const currentUrl = bestMatch.source_url || '';
-      const finalUrl = (!currentUrl || currentUrl.endsWith('/classes/all/list'))
-        ? `https://teams.microsoft.com/l/entity/2a84b049-50bc-4535-a646-5677a8207868/assignments?context=${encodeURIComponent(
-            JSON.stringify({ title: def.canonicalTitle, course: def.courseCode })
-          )}`
+      const currentUrl = bestMatch.source_url || bestMatch.deep_link || '';
+      const isInvalid = !currentUrl ||
+        currentUrl.endsWith('/classes/all/list') ||
+        currentUrl.endsWith('/classes/all/list/') ||
+        currentUrl.includes('/assignments?context=');
+      const finalUrl = isInvalid
+        ? (def.portalUrl || 'https://teams.microsoft.com/_#/assignments/')
         : currentUrl;
 
       // Update best match to canonical due date, course, specific deep link, and hash

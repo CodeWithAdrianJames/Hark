@@ -25,16 +25,24 @@
             const classId = candidate.classId || candidate.courseId || candidate.classDetails?.id;
             const assignmentId = candidate.id || cardEl.id;
             if (classId && assignmentId) {
-              const deepLink = `https://assignments.edu.cloud.microsoft/classes/${classId}/assignments/${assignmentId}?returnPath=%2Fclasses%2Fall%2Flist`;
-              cardEl.setAttribute('data-hark-fiber-deeplink', deepLink);
+              const directPortalUrl = `https://assignments.edu.cloud.microsoft/classes/${classId}/assignments/${assignmentId}`;
+              const teamsAppDeepLink = `https://teams.microsoft.com/l/entity/2a84b049-50bc-4535-a646-5677a8207868/classroom?context=${encodeURIComponent(
+                JSON.stringify({
+                  subEntityId: `assignment_${assignmentId}`,
+                  channelId: classId,
+                })
+              )}`;
+              cardEl.setAttribute('data-hark-fiber-deeplink', directPortalUrl);
+              cardEl.setAttribute('data-hark-portal-url', directPortalUrl);
+              cardEl.setAttribute('data-hark-teams-link', teamsAppDeepLink);
               cardEl.setAttribute('data-hark-class-id', String(classId));
               cardEl.setAttribute('data-hark-assignment-id', String(assignmentId));
               console.log(
-                '%c[Hark Fiber]%c Stamped assignment deep link:',
+                '%c[Hark Fiber]%c Stamped assignment direct portal & teams links:',
                 LOG_STYLE,
                 'color: #10b981;',
                 assignmentId,
-                deepLink
+                directPortalUrl
               );
               break;
             }

@@ -161,25 +161,34 @@ export const TaskCard: React.FC<TaskCardProps> = ({
       {/* Bottom Action Buttons: Deep Link + Calendar Intent */}
       <div className="flex items-center justify-between pt-3 border-t border-slate-800/80 mt-auto gap-2">
         {(() => {
-          const effectiveLink = task.deep_link || task.source_url;
-          const teamsUrl = formatTeamsDeepLink(effectiveLink, {
-            title: task.title,
-            course_code: task.course_code || undefined,
-          });
-          const finalHref = task.deep_link || (task as any).deepLink || teamsUrl;
-          return finalHref ? (
+          const rawDeepLink = (task.deep_link || (task as any).deepLink || task.source_url || '').trim();
+          const isInvalidDeepLink =
+            !rawDeepLink ||
+            rawDeepLink === '#' ||
+            rawDeepLink.startsWith('javascript:') ||
+            rawDeepLink.endsWith('/classes/all/list') ||
+            rawDeepLink.endsWith('/classes/all/list/') ||
+            /^https?:\/\/[^/]+\/classes\/all\/list(?:\?|$)/i.test(rawDeepLink);
+
+          const effectiveDeepLink = isInvalidDeepLink
+            ? 'https://teams.microsoft.com/_#/assignments/'
+            : rawDeepLink;
+
+          return (
             <a
-              href={finalHref}
+              href={effectiveDeepLink}
               target="_blank"
               rel="noopener noreferrer"
-              title="Open assignment in Teams"
+              title="Open Assignment in Teams / Portal"
+              onClick={(e) => {
+                // Allow standard new-tab navigation without preventDefault interfering
+                e.stopPropagation();
+              }}
               className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-400 hover:text-indigo-300 transition-colors group/link"
             >
               <ExternalLink className="w-3.5 h-3.5 group-hover/link:translate-x-0.5 transition-transform" />
               <span>Open in Teams</span>
             </a>
-          ) : (
-            <span className="text-xs text-slate-600">No link provided</span>
           );
         })()}
 
