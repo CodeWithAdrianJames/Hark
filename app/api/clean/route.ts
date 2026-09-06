@@ -168,11 +168,13 @@ async function performDatabaseClean(targetUserId: string) {
       // Update best match to canonical due date, course, canonical hash, and specific deep link
       const canonicalHash = computeCanonicalTaskHash(targetUserId, def.courseCode, def.canonicalTitle);
       const courseId = courseMap.get(normalizeCourseCode(def.courseCode)) || bestMatch.course_id;
-      const currentUrl = bestMatch.source_url || '';
-      const finalUrl = (!currentUrl || currentUrl.endsWith('/classes/all/list'))
-        ? `https://teams.microsoft.com/l/entity/2a84b049-50bc-4535-a646-5677a8207868/assignments?context=${encodeURIComponent(
-            JSON.stringify({ title: def.canonicalTitle, course: def.courseCode })
-          )}`
+      const currentUrl = bestMatch.source_url || (bestMatch as any).deep_link || '';
+      const isInvalid = !currentUrl ||
+        currentUrl.endsWith('/classes/all/list') ||
+        currentUrl.endsWith('/classes/all/list/') ||
+        currentUrl.includes('/assignments?context=');
+      const finalUrl = isInvalid
+        ? (def.portalUrl || 'https://teams.microsoft.com/_#/assignments/')
         : currentUrl;
 
       await sql`

@@ -1486,16 +1486,45 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
         );
         if (!fiberKey) {
           // Check if stamped by edu_fiber.js page-context extractor
-          const stampedDeepLink =
-            card.getAttribute?.('data-hark-fiber-deeplink') || card.dataset?.harkFiberDeeplink;
-          if (stampedDeepLink) {
+          const classId =
+            card.getAttribute?.('data-hark-class-id') || card.dataset?.harkClassId || '';
+          const assignmentId =
+            card.getAttribute?.('data-hark-assignment-id') || card.dataset?.harkAssignmentId || '';
+          const stampedPortalUrl =
+            card.getAttribute?.('data-hark-portal-url') ||
+            card.getAttribute?.('data-hark-fiber-deeplink') ||
+            card.dataset?.harkFiberDeeplink;
+          const stampedTeamsLink =
+            card.getAttribute?.('data-hark-teams-link') || card.dataset?.harkTeamsLink;
+
+          if (classId && assignmentId) {
+            const directPortalUrl = `https://assignments.edu.cloud.microsoft/classes/${classId}/assignments/${assignmentId}`;
+            const teamsAppDeepLink = `https://teams.microsoft.com/l/entity/2a84b049-50bc-4535-a646-5677a8207868/classroom?context=${encodeURIComponent(
+              JSON.stringify({
+                subEntityId: `assignment_${assignmentId}`,
+                channelId: classId,
+              })
+            )}`;
+
             return {
-              classId: card.getAttribute?.('data-hark-class-id') || card.dataset?.harkClassId || '',
-              assignmentId:
-                card.getAttribute?.('data-hark-assignment-id') || card.dataset?.harkAssignmentId || '',
-              deepLink: stampedDeepLink,
+              classId,
+              assignmentId,
+              directPortalUrl,
+              teamsAppDeepLink,
+              deepLink: directPortalUrl,
             };
           }
+
+          if (stampedPortalUrl) {
+            return {
+              classId: classId || '',
+              assignmentId: assignmentId || '',
+              directPortalUrl: stampedPortalUrl,
+              teamsAppDeepLink: stampedTeamsLink || null,
+              deepLink: stampedPortalUrl,
+            };
+          }
+
           // Check child element if card itself doesn't directly expose the fiber key
           const childWithFiber = card.querySelector && card.querySelector('*');
           if (childWithFiber) {
@@ -1511,10 +1540,20 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
             const classId = candidate.classId || candidate.courseId;
             const assignmentId = candidate.id || card.id;
             if (classId && assignmentId) {
+              const directPortalUrl = `https://assignments.edu.cloud.microsoft/classes/${classId}/assignments/${assignmentId}`;
+              const teamsAppDeepLink = `https://teams.microsoft.com/l/entity/2a84b049-50bc-4535-a646-5677a8207868/classroom?context=${encodeURIComponent(
+                JSON.stringify({
+                  subEntityId: `assignment_${assignmentId}`,
+                  channelId: classId,
+                })
+              )}`;
+
               return {
                 classId,
                 assignmentId,
-                deepLink: `https://assignments.edu.cloud.microsoft/classes/${classId}/assignments/${assignmentId}?returnPath=%2Fclasses%2Fall%2Flist`,
+                directPortalUrl,
+                teamsAppDeepLink,
+                deepLink: directPortalUrl,
               };
             }
           }
@@ -1778,8 +1817,8 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
       // Deep link resolution targeting specific assignment view
       const fiberDetails = getAssignmentFiberDetails(card);
       let deepLink = fiberDetails?.deepLink || extractEduCardDeepLink(card);
-      if (!deepLink || deepLink.endsWith('/classes/all/list')) {
-        deepLink = window.location.href;
+      if (!deepLink || deepLink.endsWith('/classes/all/list') || deepLink.endsWith('/classes/all/list/')) {
+        deepLink = 'https://teams.microsoft.com/_#/assignments/';
       }
 
       const signature = `${title.toLowerCase()}::${courseCode.toLowerCase()}::${rawDueString.toLowerCase()}`;
@@ -1792,6 +1831,8 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
           courseBadge,
           rawDueString,
           deepLink,
+          directPortalUrl: fiberDetails?.directPortalUrl || deepLink,
+          teamsAppDeepLink: fiberDetails?.teamsAppDeepLink || null,
         });
       }
     }
@@ -1878,6 +1919,7 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
 
             // Attempt to find element matching titleLine to extract specific deepLink
             let deepLink = null;
+            let fiberDetails = null;
             try {
               const allCandidateEls = listRoot.querySelectorAll(
                 'div[data-test="assignment-card"], [data-test="assignment-card"], a, [role="row"], [role="listitem"], [data-tid*="assignment"], h2, h3, h4, strong, div[data-is-focusable="true"]'
@@ -1888,16 +1930,17 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
                     candidateEl.closest(
                       'div[data-test="assignment-card"], [data-test="assignment-card"], a, [role="row"], [role="listitem"], [data-tid*="assignment"]'
                     ) || candidateEl;
-                  deepLink = getAssignmentFiberDetails(cardTarget)?.deepLink || extractEduCardDeepLink(cardTarget);
-                  if (deepLink && !deepLink.endsWith('/classes/all/list')) break;
+                  fiberDetails = getAssignmentFiberDetails(cardTarget);
+                  deepLink = fiberDetails?.deepLink || extractEduCardDeepLink(cardTarget);
+                  if (deepLink && !deepLink.endsWith('/classes/all/list') && !deepLink.endsWith('/classes/all/list/')) break;
                 }
               }
             } catch {
               // ignore
             }
 
-            if (!deepLink || deepLink.endsWith('/classes/all/list')) {
-              deepLink = window.location.href;
+            if (!deepLink || deepLink.endsWith('/classes/all/list') || deepLink.endsWith('/classes/all/list/')) {
+              deepLink = 'https://teams.microsoft.com/_#/assignments/';
             }
 
             const signature = `${titleLine.toLowerCase()}::${courseCode.toLowerCase()}::${rawDueString.toLowerCase()}`;
@@ -1910,6 +1953,8 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
                 courseBadge,
                 rawDueString,
                 deepLink,
+                directPortalUrl: fiberDetails?.directPortalUrl || deepLink,
+                teamsAppDeepLink: fiberDetails?.teamsAppDeepLink || null,
               });
             }
           }

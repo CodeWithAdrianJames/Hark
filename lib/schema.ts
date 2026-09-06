@@ -92,6 +92,7 @@ export interface RealDeliverableDefinition {
   courseBadge: string;
   canonicalDueIso: string;
   rawDueString: string;
+  portalUrl?: string;
 }
 
 export const REAL_DELIVERABLES: RealDeliverableDefinition[] = [
@@ -102,6 +103,7 @@ export const REAL_DELIVERABLES: RealDeliverableDefinition[] = [
     courseBadge: '[CSIT321G1]',
     canonicalDueIso: '2026-09-06T17:00:00.000Z', // Sep 7, 2026, 1:00 AM (UTC+8)
     rawDueString: 'Sep 7, 2026 1:00 AM',
+    portalUrl: 'https://assignments.edu.cloud.microsoft/classes/e92c366c-8175-4790-bc7f-826dc42f0e14/assignments/abf580cd-830a-41f4-b7b0-4af1e96104df',
   },
   {
     titlePattern: '5 prelim',
@@ -110,6 +112,7 @@ export const REAL_DELIVERABLES: RealDeliverableDefinition[] = [
     courseBadge: '[CSIT321G1]',
     canonicalDueIso: '2026-09-06T17:30:00.000Z', // Sep 7, 2026, 1:30 AM (UTC+8)
     rawDueString: 'Sep 7, 2026 1:30 AM',
+    portalUrl: 'https://teams.microsoft.com/_#/assignments/',
   },
   {
     titlePattern: 'final proposal',
@@ -118,6 +121,7 @@ export const REAL_DELIVERABLES: RealDeliverableDefinition[] = [
     courseBadge: '[IT317]',
     canonicalDueIso: '2026-09-08T15:59:59.000Z', // Sep 8, 2026, 11:59 PM (UTC+8)
     rawDueString: 'Sep 8, 2026 11:59 PM',
+    portalUrl: 'https://teams.microsoft.com/_#/assignments/',
   },
   {
     titlePattern: 'research assignment',
@@ -126,6 +130,7 @@ export const REAL_DELIVERABLES: RealDeliverableDefinition[] = [
     courseBadge: '[IT365]',
     canonicalDueIso: '2026-09-12T15:59:59.000Z', // Sep 12, 2026, 11:59 PM (UTC+8)
     rawDueString: 'Sep 12, 2026 11:59 PM',
+    portalUrl: 'https://teams.microsoft.com/_#/assignments/',
   },
   {
     titlePattern: 'acquaintance party attendance',
@@ -134,6 +139,7 @@ export const REAL_DELIVERABLES: RealDeliverableDefinition[] = [
     courseBadge: '[CSIT321G1]',
     canonicalDueIso: '2026-09-13T15:59:59.000Z', // Sep 13, 2026, 11:59 PM (UTC+8)
     rawDueString: 'Sep 13, 2026 11:59 PM',
+    portalUrl: 'https://teams.microsoft.com/_#/assignments/',
   },
   {
     titlePattern: 'acquaintance party bonus',
@@ -142,5 +148,6 @@ export const REAL_DELIVERABLES: RealDeliverableDefinition[] = [
     courseBadge: '[IT317]',
     canonicalDueIso: '2026-09-30T15:59:59.000Z', // Sep 30, 2026, 11:59 PM (UTC+8)
     rawDueString: 'Sep 30, 2026 11:59 PM',
+    portalUrl: 'https://teams.microsoft.com/_#/assignments/',
   },
 ];
