@@ -1299,8 +1299,163 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
           return true;
         }
       }
+
+      // 3. Extension-driven tab & card focus bridge
+      if (request && request.type === 'FOCUS_AND_CLICK_CARD') {
+        const found = focusAndClickAssignmentCard(request.assignmentId, request.title);
+        sendResponse({ success: true, found });
+        return false;
+      }
     });
   }
+
+  /**
+   * Helper: Locate and focus/click an assignment card by ID or title in current document,
+   * or broadcast to child iframes if rendered within an embedded frame.
+   */
+  function focusAndClickAssignmentCard(assignmentId, title) {
+    log('[Hark] Received FOCUS_AND_CLICK_CARD request for:', assignmentId, title);
+
+    try {
+      let targetCard = null;
+
+      if (assignmentId) {
+        targetCard =
+          document.getElementById(assignmentId) ||
+          document.querySelector(`[id="${assignmentId}"]`) ||
+          document.querySelector(`[data-test="assignment-card"][id="${assignmentId}"]`) ||
+          document.querySelector(`[data-assignment-id="${assignmentId}"]`) ||
+          document.querySelector(`[data-item-id="${assignmentId}"]`);
+      }
+
+      // Fallback: match by title text if ID is not immediately found
+      if (!targetCard && title) {
+        const candidateCards = document.querySelectorAll(
+          'div[data-test="assignment-card"], [data-test="assignment-card"], [role="row"], [role="listitem"], [data-tid*="assignment"]'
+        );
+        for (const c of candidateCards) {
+          if (c.textContent && c.textContent.includes(title)) {
+            targetCard = c;
+            break;
+          }
+        }
+      }
+
+      if (targetCard) {
+        log('[Hark] Found target card. Scrolling into view and clicking:', targetCard);
+        targetCard.scrollIntoView({ behavior: 'smooth', block: 'center' });
+
+        // Highlight card with rich pulse
+        const originalOutline = targetCard.style.outline;
+        const originalBoxShadow = targetCard.style.boxShadow;
+        const originalTransition = targetCard.style.transition;
+        targetCard.style.transition = 'all 0.3s ease';
+        targetCard.style.outline = '2px solid #6366f1';
+        targetCard.style.boxShadow = '0 0 20px rgba(99, 102, 241, 0.6)';
+
+        setTimeout(() => {
+          targetCard.style.outline = originalOutline;
+          targetCard.style.boxShadow = originalBoxShadow;
+          targetCard.style.transition = originalTransition;
+        }, 2500);
+
+        // Click card or its primary clickable button/anchor
+        const clickable =
+          targetCard.querySelector('button, a, [role="button"]') || targetCard;
+        clickable.click();
+        return true;
+      }
+
+      // If in top frame, broadcast to all child iframes (e.g. assignments.edu.cloud.microsoft)
+      const iframes = document.querySelectorAll('iframe');
+      if (iframes.length > 0) {
+        log(`[Hark] Card not in current frame. Broadcasting FOCUS_AND_CLICK_CARD to ${iframes.length} iframe(s)...`);
+        iframes.forEach((ifr) => {
+          try {
+            ifr.contentWindow?.postMessage(
+              {
+                type: 'HARK_FOCUS_AND_CLICK_CARD',
+                assignmentId,
+                title,
+              },
+              '*'
+            );
+          } catch {
+            // cross-origin ignore
+          }
+        });
+      }
+
+      // If in top frame and not on assignments page, show toast
+      if (window.top === window.self && !location.href.includes('assignments')) {
+        showHarkToast(
+          `Assignment "${title || assignmentId}" is in your Teams Assignments. Opening Assignments Hub...`
+        );
+        const assignmentsNav = document.querySelector(
+          'button#app-bar-2a84b049-50bc-4535-a646-5677a8207868, button[aria-label*="Assignments"], a[aria-label*="Assignments"]'
+        );
+        if (assignmentsNav) {
+          assignmentsNav.click();
+        }
+      }
+
+      return false;
+    } catch (err) {
+      console.warn('[Hark] Error in focusAndClickAssignmentCard:', err);
+      return false;
+    }
+  }
+
+  function showHarkToast(text) {
+    try {
+      const old = document.getElementById('hark-nav-toast');
+      if (old) old.remove();
+
+      const toast = document.createElement('div');
+      toast.id = 'hark-nav-toast';
+      toast.textContent = text;
+      Object.assign(toast.style, {
+        position: 'fixed',
+        bottom: '24px',
+        right: '24px',
+        backgroundColor: '#0f172a',
+        color: '#f8fafc',
+        padding: '12px 18px',
+        borderRadius: '8px',
+        border: '1px solid #6366f1',
+        boxShadow: '0 10px 25px -5px rgba(0, 0, 0, 0.5), 0 0 10px rgba(99, 102, 241, 0.3)',
+        fontSize: '13px',
+        fontWeight: '500',
+        zIndex: '9999999',
+        transition: 'opacity 0.3s ease, transform 0.3s ease',
+        opacity: '0',
+        transform: 'translateY(10px)',
+        pointerEvents: 'none',
+        fontFamily: 'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+      });
+
+      document.body.appendChild(toast);
+      requestAnimationFrame(() => {
+        toast.style.opacity = '1';
+        toast.style.transform = 'translateY(0)';
+      });
+
+      setTimeout(() => {
+        toast.style.opacity = '0';
+        toast.style.transform = 'translateY(10px)';
+        setTimeout(() => toast.remove(), 300);
+      }, 4000);
+    } catch {
+      // ignore
+    }
+  }
+
+  // Cross-frame message relay for FOCUS_AND_CLICK_CARD
+  window.addEventListener('message', (event) => {
+    if (event.data?.type === 'HARK_FOCUS_AND_CLICK_CARD') {
+      focusAndClickAssignmentCard(event.data.assignmentId, event.data.title);
+    }
+  });
 
   /**
    * Helper: Extracts text lines from a DOM subtree with strict newline separation
@@ -1821,6 +1976,14 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
         deepLink = 'https://teams.microsoft.com/_#/assignments/';
       }
 
+      // Scraper ID Capture: Extract UUID from card element
+      const assignmentId =
+        card.id ||
+        card.getAttribute?.('data-assignment-id') ||
+        card.getAttribute?.('data-item-id') ||
+        fiberDetails?.assignmentId ||
+        null;
+
       const signature = `${title.toLowerCase()}::${courseCode.toLowerCase()}::${rawDueString.toLowerCase()}`;
       if (!seenSignatures.has(signature)) {
         seenSignatures.add(signature);
@@ -1831,6 +1994,7 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
           courseBadge,
           rawDueString,
           deepLink,
+          assignmentId,
           directPortalUrl: fiberDetails?.directPortalUrl || deepLink,
           teamsAppDeepLink: fiberDetails?.teamsAppDeepLink || null,
         });
@@ -1943,6 +2107,13 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
               deepLink = 'https://teams.microsoft.com/_#/assignments/';
             }
 
+            const assignmentId =
+              fiberDetails?.assignmentId ||
+              cardTarget?.id ||
+              cardTarget?.getAttribute?.('data-assignment-id') ||
+              cardTarget?.getAttribute?.('data-item-id') ||
+              null;
+
             const signature = `${titleLine.toLowerCase()}::${courseCode.toLowerCase()}::${rawDueString.toLowerCase()}`;
             if (!seenSignatures.has(signature)) {
               seenSignatures.add(signature);
@@ -1953,6 +2124,7 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
                 courseBadge,
                 rawDueString,
                 deepLink,
+                assignmentId,
                 directPortalUrl: fiberDetails?.directPortalUrl || deepLink,
                 teamsAppDeepLink: fiberDetails?.teamsAppDeepLink || null,
               });

@@ -165,6 +165,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true; // Keep message channel open for async response
   }
 
+  // 2. Relay NAVIGATE_TO_ASSIGNMENT from internal components
+  if (message?.type === 'NAVIGATE_TO_ASSIGNMENT') {
+    navigateToAssignmentInTeams(message.assignmentId, message.title, sendResponse);
+    return true;
+  }
+
   return false;
 });
 
@@ -348,7 +354,100 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
     return true; // Keep message channel open for async response
   }
 
+  // 5. Extension-driven tab & card focus bridge
+  if (message.type === 'NAVIGATE_TO_ASSIGNMENT') {
+    navigateToAssignmentInTeams(message.assignmentId, message.title, sendResponse);
+    return true;
+  }
+
   // Unknown message type
   sendResponse({ error: `Unknown message type: ${message.type}` });
   return false;
 });
+
+/**
+ * Helper: Find open Microsoft Teams / EDU Assignments tab, activate & focus it,
+ * and dispatch FOCUS_AND_CLICK_CARD to the tab's content script.
+ * If no open Teams tab exists, opens https://teams.microsoft.com/_#/assignments/ in a new tab.
+ */
+function navigateToAssignmentInTeams(assignmentId, title, sendResponse) {
+  console.log('[Hark Background] Navigating to assignment:', assignmentId, title);
+
+  chrome.tabs.query(
+    {
+      url: [
+        '*://teams.microsoft.com/*',
+        '*://*.teams.microsoft.com/*',
+        'https://assignments.edu.cloud.microsoft/*',
+        'https://*.assignments.edu.cloud.microsoft/*',
+      ],
+    },
+    (tabs) => {
+      if (tabs && tabs.length > 0) {
+        // Prioritize active tab, then tabs with assignments in URL
+        const targetTab =
+          tabs.find((t) => t.active) ||
+          tabs.find((t) => t.url && t.url.includes('assignments')) ||
+          tabs[0];
+
+        console.log(
+          `[Hark Background] Found open Teams tab (${targetTab.id}: ${targetTab.url}). Activating and focusing...`
+        );
+
+        // 1. Activate tab
+        chrome.tabs.update(targetTab.id, { active: true }, () => {
+          // 2. Focus window
+          if (targetTab.windowId) {
+            chrome.windows.update(targetTab.windowId, { focused: true });
+          }
+
+          // 3. Send message to tab content script
+          chrome.tabs.sendMessage(
+            targetTab.id,
+            {
+              type: 'FOCUS_AND_CLICK_CARD',
+              assignmentId,
+              title,
+            },
+            (contentResponse) => {
+              if (chrome.runtime.lastError) {
+                console.warn(
+                  '[Hark Background] Note delivering FOCUS_AND_CLICK_CARD to tab:',
+                  chrome.runtime.lastError.message
+                );
+              }
+              console.log(
+                '[Hark Background] FOCUS_AND_CLICK_CARD content script response:',
+                contentResponse
+              );
+              sendResponse({
+                success: true,
+                action: 'focused_tab',
+                tabId: targetTab.id,
+                contentResponse,
+              });
+            }
+          );
+        });
+      } else {
+        // Teams not open: open a new tab directly to the assignments hub
+        console.log(
+          '[Hark Background] No open Teams tab found. Opening https://teams.microsoft.com/_#/assignments/...'
+        );
+        chrome.tabs.create(
+          {
+            url: 'https://teams.microsoft.com/_#/assignments/',
+            active: true,
+          },
+          (newTab) => {
+            sendResponse({
+              success: true,
+              action: 'opened_new_tab',
+              tabId: newTab.id,
+            });
+          }
+        );
+      }
+    }
+  );
+}
