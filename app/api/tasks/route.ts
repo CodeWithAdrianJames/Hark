@@ -5,7 +5,7 @@ export const dynamic = 'force-dynamic';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET, PATCH, OPTIONS',
+  'Access-Control-Allow-Methods': 'GET, PATCH, POST, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type, Authorization',
 };
 
@@ -49,6 +49,8 @@ export async function GET(req: NextRequest) {
         COALESCE(t.deep_link, t.source_url) AS deep_link,
         t.raw_message_hash,
         t.status,
+        COALESCE(t.is_completed, t.status = 'completed') AS is_completed,
+        COALESCE(t.is_completed, t.status = 'completed') AS completed,
         t.created_at,
         c.code AS course_code,
         c.name AS course_name,
@@ -59,12 +61,20 @@ export async function GET(req: NextRequest) {
       ORDER BY t.due_date ASC, t.created_at DESC;
     `;
 
-    // Query all courses for course filters
+    // Query all courses for course view and filters
     const courses = await sql`
-      SELECT id, code, name, channel_id
-      FROM courses
-      WHERE user_id = ${userId}::uuid
-      ORDER BY code ASC;
+      SELECT 
+        c.id, 
+        c.code, 
+        c.name, 
+        c.channel_id,
+        c.created_at,
+        COUNT(t.id)::int AS task_count
+      FROM courses c
+      LEFT JOIN tasks t ON t.course_id = c.id
+      WHERE c.user_id = ${userId}::uuid
+      GROUP BY c.id, c.code, c.name, c.channel_id, c.created_at
+      ORDER BY c.code ASC;
     `;
 
     return NextResponse.json({ tasks, courses }, { status: 200, headers: corsHeaders });
@@ -77,27 +87,52 @@ export async function GET(req: NextRequest) {
 
 /**
  * PATCH /api/tasks
- * Updates the status of an existing task ('pending', 'in_progress', 'completed').
+ * Updates the status or completion state of an existing task.
+ * Accepts: { id, status }, { taskId, completed }, or { id, completed }
  */
 export async function PATCH(req: NextRequest) {
   try {
     const body = await req.json();
-    const { id, status } = body;
+    const taskId = body.taskId || body.id;
+    const { status, completed } = body;
 
-    if (!id || !['pending', 'in_progress', 'completed'].includes(status)) {
+    if (!taskId) {
       return NextResponse.json(
-        { error: 'Invalid payload: "id" and a valid "status" (pending, in_progress, completed) are required.' },
+        { error: 'Invalid payload: "id" or "taskId" is required.' },
         { status: 400, headers: corsHeaders }
       );
     }
 
     const sql = getDb();
-    const [updatedTask] = await sql`
-      UPDATE tasks
-      SET status = ${status}
-      WHERE id = ${id}::uuid
-      RETURNING *;
-    `;
+    let updatedTask;
+
+    if (completed !== undefined) {
+      const isComp = Boolean(completed);
+      const newStatus = isComp ? 'completed' : 'pending';
+      [updatedTask] = await sql`
+        UPDATE tasks
+        SET 
+          is_completed = ${isComp},
+          status = ${newStatus}
+        WHERE id = ${taskId}::uuid
+        RETURNING *;
+      `;
+    } else if (status && ['pending', 'in_progress', 'completed'].includes(status)) {
+      const isComp = status === 'completed';
+      [updatedTask] = await sql`
+        UPDATE tasks
+        SET 
+          status = ${status},
+          is_completed = ${isComp}
+        WHERE id = ${taskId}::uuid
+        RETURNING *;
+      `;
+    } else {
+      return NextResponse.json(
+        { error: 'Invalid payload: provide either a boolean "completed" or valid "status".' },
+        { status: 400, headers: corsHeaders }
+      );
+    }
 
     if (!updatedTask) {
       return NextResponse.json(

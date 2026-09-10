@@ -27,6 +27,8 @@ export interface TaskItem {
   class_id?: string | null;
   raw_message_hash: string | null;
   status: 'pending' | 'in_progress' | 'completed';
+  is_completed?: boolean;
+  completed?: boolean;
   created_at: string;
   course_code?: string | null;
   course_name?: string | null;

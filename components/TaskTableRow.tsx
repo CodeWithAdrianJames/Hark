@@ -1,29 +1,26 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
-  CheckCircle2,
-  Circle,
+  Check,
   ExternalLink,
   CalendarPlus,
   FileText,
   MessageSquare,
-  AlertCircle,
-  Clock,
   ChevronDown,
   ChevronUp,
+  Flag,
+  MoreHorizontal,
 } from 'lucide-react';
 import { TaskItem } from '@/components/TaskCard';
 import {
   parseDueDate,
   buildGoogleCalendarUrl,
-  formatTeamsDeepLink,
-  getUrgencyBadgeClasses,
 } from '@/lib/dateUtils';
 
 export interface TaskTableRowProps {
   task: TaskItem;
-  onToggleStatus: (taskId: string, newStatus: 'pending' | 'completed') => void;
+  onToggleStatus: (taskId: string, completed: boolean) => void;
   isUpdating?: boolean;
 }
 
@@ -33,9 +30,28 @@ export const TaskTableRow: React.FC<TaskTableRowProps> = ({
   isUpdating = false,
 }) => {
   const [isExpanded, setIsExpanded] = useState(false);
-  const isCompleted = task.status === 'completed';
+  const [isMenuOpen, setIsMenuOpen] = useState(false);
+  const actionMenuRef = useRef<HTMLDivElement>(null);
+
+  const isCompleted = Boolean(
+    task.is_completed ?? task.completed ?? (task.status === 'completed')
+  );
   const dueInfo = parseDueDate(task.due_date);
   const isFormal = task.source_type === 'official_assignment';
+
+  // Close menus on outside click
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (
+        actionMenuRef.current &&
+        !actionMenuRef.current.contains(e.target as Node)
+      ) {
+        setIsMenuOpen(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
 
   const googleCalUrl = buildGoogleCalendarUrl({
     title: task.title,
@@ -46,13 +62,17 @@ export const TaskTableRow: React.FC<TaskTableRowProps> = ({
   });
 
   // Handler to bridge assignment navigation to Hark Chrome Extension or fallback cleanly
-  const handleOpenInTeams = async (e: React.MouseEvent<HTMLAnchorElement>) => {
+  const handleOpenInTeams = async (
+    e: React.MouseEvent<HTMLButtonElement | HTMLAnchorElement>
+  ) => {
     e.preventDefault();
     e.stopPropagation();
 
     const extensionId =
       process.env.NEXT_PUBLIC_HARK_EXTENSION_ID?.trim() ||
-      (typeof window !== 'undefined' ? localStorage.getItem('hark_local_extension_id')?.trim() : '') ||
+      (typeof window !== 'undefined'
+        ? localStorage.getItem('hark_local_extension_id')?.trim()
+        : '') ||
       '';
 
     if (
@@ -71,8 +91,11 @@ export const TaskTableRow: React.FC<TaskTableRowProps> = ({
           },
           (response: any) => {
             if ((window as any).chrome.runtime.lastError || !response?.success) {
-              // Fallback to Teams web
-              window.open('https://teams.microsoft.com/v2/', '_blank', 'noopener,noreferrer');
+              window.open(
+                'https://teams.microsoft.com/v2/',
+                '_blank',
+                'noopener,noreferrer'
+              );
             }
           }
         );
@@ -84,77 +107,102 @@ export const TaskTableRow: React.FC<TaskTableRowProps> = ({
     window.open('https://teams.microsoft.com/v2/', '_blank', 'noopener,noreferrer');
   };
 
-  // Dynamic urgency badge colors based on requirements:
-  // Red: Due today
-  // Yellow: Due tomorrow
-  // Blue: Due within 7 days
-  // Slate/Neutral: Due in 8+ days
-  const getBadgeColorClasses = () => {
-    if (isCompleted) {
-      return 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20';
-    }
-    switch (dueInfo.urgency) {
-      case 'overdue':
-        return 'bg-rose-500/20 text-rose-300 border-rose-500/40';
-      case 'today':
-        return 'bg-rose-500/15 text-rose-300 border-rose-500/30';
-      case 'tomorrow':
-        return 'bg-amber-500/15 text-amber-300 border-amber-500/30';
-      case 'within_7_days':
-        return 'bg-blue-500/15 text-blue-300 border-blue-500/30';
-      case 'later':
-      default:
-        return 'bg-slate-800 text-slate-400 border-slate-700/60';
-    }
+  // Formatted Date
+  const formatDateDisplay = (dateStr: string) => {
+    const d = new Date(dateStr);
+    if (isNaN(d.getTime())) return 'No deadline';
+    return new Intl.DateTimeFormat('en-US', {
+      day: 'numeric',
+      month: 'short',
+      year: 'numeric',
+    }).format(d);
   };
 
+  // Priority / Urgency Flag and Style
+  const getPriorityInfo = () => {
+    if (isCompleted) {
+      return {
+        label: 'Completed',
+        className: 'text-emerald-700 bg-emerald-50 border-emerald-200',
+        flagColor: 'text-emerald-500 fill-emerald-500',
+      };
+    }
+    if (dueInfo.urgency === 'overdue' || dueInfo.urgency === 'today') {
+      return {
+        label: dueInfo.urgency === 'overdue' ? 'Overdue' : 'Due Today',
+        className: 'text-rose-700 bg-rose-50 border-rose-200',
+        flagColor: 'text-rose-500 fill-rose-500',
+      };
+    }
+    if (dueInfo.urgency === 'tomorrow' || dueInfo.urgency === 'within_7_days') {
+      return {
+        label: dueInfo.urgency === 'tomorrow' ? 'Tomorrow' : 'This Week',
+        className: 'text-amber-700 bg-amber-50 border-amber-200',
+        flagColor: 'text-amber-500 fill-amber-500',
+      };
+    }
+    return {
+      label: 'Later',
+      className: 'text-[#5C5C99] bg-[#CCCCFF]/20 border-[#CCCCFF]/60',
+      flagColor: 'text-[#5C5C99] fill-[#5C5C99]',
+    };
+  };
+
+  const priorityInfo = getPriorityInfo();
   const hasDescription = Boolean(task.description && task.description.trim().length > 0);
+
+  // Clean course label and initial
+  const courseClean =
+    task.course_name?.trim() ||
+    (task.course_code ? task.course_code.replace(/^\[+|\]+$/g, '') : 'General');
+  const prefixChar = courseClean.charAt(0).toUpperCase() || 'G';
 
   return (
     <>
       <tr
-        className={`group border-b border-slate-800/60 transition-colors duration-150 ${
-          isCompleted
-            ? 'bg-[#090e18]/40 hover:bg-[#0c1220]/60 opacity-65'
-            : 'bg-[#0b101c]/40 hover:bg-[#111827]/70'
+        className={`group border-b border-slate-100 hover:bg-[#F8F9FD]/80 transition-colors duration-150 ${
+          isCompleted ? 'bg-slate-50/40 text-slate-400' : 'bg-white text-slate-800'
         }`}
       >
-        {/* 1. Status Checkbox */}
-        <td className="py-3 px-3.5 w-12 text-center align-middle">
+        {/* Checkbox Column */}
+        <td className="py-3 px-3.5 w-10 text-center align-middle">
           <button
             type="button"
             disabled={isUpdating}
-            onClick={() => onToggleStatus(task.id, isCompleted ? 'pending' : 'completed')}
-            className="text-slate-400 hover:text-indigo-400 focus:outline-none transition-transform active:scale-90 inline-flex items-center justify-center"
-            title={isCompleted ? 'Mark as pending' : 'Mark as completed'}
+            onClick={() => onToggleStatus(task.id, !isCompleted)}
+            className={`w-4.5 h-4.5 rounded border flex items-center justify-center transition-all cursor-pointer ${
+              isCompleted
+                ? 'bg-[#292966] border-[#292966] text-white shadow-2xs'
+                : 'border-slate-300 hover:border-[#292966] bg-white'
+            }`}
+            title={isCompleted ? 'Mark as active' : 'Mark as completed'}
           >
-            {isCompleted ? (
-              <CheckCircle2 className="w-4.5 h-4.5 text-emerald-400 fill-emerald-500/20" />
-            ) : (
-              <Circle className="w-4.5 h-4.5 text-slate-500 hover:stroke-indigo-400" />
-            )}
+            {isCompleted && <Check className="w-3 h-3 stroke-[3]" />}
           </button>
         </td>
 
-        {/* 2. Assignment Title + Badges */}
+        {/* 1. TASK */}
         <td className="py-3 px-3.5 align-middle">
-          <div className="flex flex-col gap-1 min-w-[200px] max-w-xl">
+          <div className="flex flex-col gap-1 max-w-md">
             <div className="flex items-center gap-2 flex-wrap">
               <span
-                className={`font-semibold text-sm leading-snug break-words ${
-                  isCompleted ? 'line-through text-slate-400' : 'text-slate-100'
+                onClick={() => hasDescription && setIsExpanded(!isExpanded)}
+                className={`text-xs font-semibold leading-snug cursor-pointer transition-colors ${
+                  isCompleted
+                    ? 'line-through text-slate-400'
+                    : 'text-[#292966] hover:text-[#1E1E4F] hover:underline'
                 }`}
+                title={hasDescription ? 'Click to view instructions' : undefined}
               >
-                {task.title}
+                {task.title || 'Untitled Assignment'}
               </span>
 
-              {/* Subtle Badge: Assignment vs Announcement */}
+              {/* Source Badge */}
               <span
-                title={isFormal ? 'Official Assignment' : 'Teams Chat Announcement'}
-                className={`inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded border uppercase tracking-wider ${
+                className={`inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded border ${
                   isFormal
-                    ? 'bg-blue-500/10 text-blue-300 border-blue-500/25'
-                    : 'bg-purple-500/10 text-purple-300 border-purple-500/25'
+                    ? 'bg-blue-50 text-blue-700 border-blue-200'
+                    : 'bg-[#CCCCFF]/25 text-[#5C5C99] border-[#CCCCFF]/60'
                 }`}
               >
                 {isFormal ? (
@@ -162,16 +210,15 @@ export const TaskTableRow: React.FC<TaskTableRowProps> = ({
                 ) : (
                   <MessageSquare className="w-2.5 h-2.5" />
                 )}
-                {isFormal ? 'Assignment' : 'Announcement'}
+                <span>{isFormal ? 'Assignment' : 'Announcement'}</span>
               </span>
 
-              {/* Optional Expandable Note Toggle */}
+              {/* Expand description toggle */}
               {hasDescription && (
                 <button
                   type="button"
                   onClick={() => setIsExpanded(!isExpanded)}
-                  className="text-[11px] text-slate-500 hover:text-indigo-400 inline-flex items-center gap-0.5 transition-colors"
-                  title="Toggle assignment instructions / notes"
+                  className="text-[11px] text-[#5C5C99] hover:text-[#292966] inline-flex items-center gap-0.5 transition-colors"
                 >
                   {isExpanded ? (
                     <ChevronUp className="w-3.5 h-3.5" />
@@ -183,112 +230,137 @@ export const TaskTableRow: React.FC<TaskTableRowProps> = ({
               )}
             </div>
 
-            {/* In-row short snippet if collapsed */}
             {!isExpanded && hasDescription && (
-              <p className="text-[11px] text-slate-400 line-clamp-1 truncate max-w-lg">
+              <p className="text-[11px] text-slate-500 line-clamp-1 truncate max-w-sm">
                 {task.description}
               </p>
             )}
           </div>
         </td>
 
-        {/* 3. Course Tag / Pill */}
-        <td className="py-3 px-3.5 whitespace-nowrap align-middle w-32">
-          {task.course_code ? (
-            <span className="inline-flex items-center px-2.5 py-0.5 rounded-md text-xs font-semibold font-mono tracking-wide bg-indigo-500/15 text-indigo-300 border border-indigo-500/30 shadow-xs">
-              [{task.course_code.replace(/^\[+|\]+$/g, '')}]
+        {/* 2. COURSE */}
+        <td className="py-3 px-3.5 whitespace-nowrap align-middle">
+          <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-[#CCCCFF]/30 border border-[#CCCCFF]/70 text-xs font-medium text-[#292966] max-w-[170px] shadow-2xs">
+            <span className="w-4 h-4 rounded bg-[#5C5C99] text-white text-[9px] font-bold flex items-center justify-center flex-shrink-0">
+              {prefixChar}
             </span>
-          ) : (
-            <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] text-slate-500 bg-slate-800/40 border border-slate-800">
-              General
-            </span>
-          )}
-        </td>
-
-        {/* 4. Due Date & Time Formatted Locally */}
-        <td className="py-3 px-3.5 whitespace-nowrap align-middle w-48">
-          <div className="flex items-center gap-1.5 text-xs text-slate-300 font-medium">
-            <Clock className="w-3.5 h-3.5 text-slate-400 flex-shrink-0" />
-            <span>{dueInfo.formattedDate}</span>
+            <span className="truncate">{courseClean}</span>
           </div>
         </td>
 
-        {/* 5. Urgency / Countdown Badge */}
-        <td className="py-3 px-3.5 whitespace-nowrap align-middle w-44">
-          <span
-            className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border ${getBadgeColorClasses()}`}
-          >
+        {/* 3. DUE DATE */}
+        <td className="py-3 px-3.5 whitespace-nowrap align-middle">
+          <div className="flex flex-col">
             <span
-              className={`w-1.5 h-1.5 rounded-full ${
-                dueInfo.urgency === 'today'
-                  ? 'bg-rose-400 animate-pulse'
-                  : dueInfo.urgency === 'tomorrow'
-                  ? 'bg-amber-400'
-                  : dueInfo.urgency === 'within_7_days'
-                  ? 'bg-blue-400'
-                  : isCompleted
-                  ? 'bg-emerald-400'
-                  : 'bg-slate-400'
+              className={`text-xs font-medium ${
+                !isCompleted && (dueInfo.urgency === 'overdue' || dueInfo.urgency === 'today')
+                  ? 'text-rose-600 font-semibold'
+                  : !isCompleted && dueInfo.urgency === 'tomorrow'
+                  ? 'text-amber-600 font-medium'
+                  : 'text-slate-700'
               }`}
-            />
-            {dueInfo.urgency === 'overdue' && !isCompleted ? (
-              <span className="flex items-center gap-1 font-semibold">
-                <AlertCircle className="w-3 h-3 text-rose-400" />
-                {dueInfo.countdownText}
-              </span>
-            ) : isCompleted ? (
-              'Completed'
-            ) : (
-              <span>{dueInfo.countdownText}</span>
-            )}
-          </span>
+            >
+              {formatDateDisplay(task.due_date)}
+            </span>
+            <span className="text-[10px] text-slate-400">
+              {isCompleted ? 'Completed' : dueInfo.countdownText}
+            </span>
+          </div>
         </td>
 
-        {/* 6. Actions: Open in Teams + Google Calendar */}
-        <td className="py-3 px-3.5 whitespace-nowrap text-right align-middle w-28">
-          <div className="flex items-center justify-end gap-1.5">
-            {/* Open in Teams / Portal */}
-            <a
-              href="https://teams.microsoft.com/v2/"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex items-center justify-center p-1.5 rounded-lg bg-slate-800/80 hover:bg-indigo-600 text-slate-300 hover:text-white border border-slate-700/60 hover:border-indigo-500 transition-all shadow-xs"
-              title="Open Assignment in Teams"
-              onClick={handleOpenInTeams}
-            >
-              <ExternalLink className="w-3.5 h-3.5" />
-            </a>
+        {/* 4. URGENCY */}
+        <td className="py-3 px-3.5 whitespace-nowrap align-middle">
+          <div
+            className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border shadow-2xs ${priorityInfo.className}`}
+          >
+            <Flag className={`w-3 h-3 ${priorityInfo.flagColor}`} />
+            <span>{priorityInfo.label}</span>
+          </div>
+        </td>
 
-            {/* Add to Google Calendar */}
-            <a
-              href={googleCalUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              title="Add deadline to Google Calendar"
-              className="inline-flex items-center justify-center p-1.5 rounded-lg bg-slate-800/80 hover:bg-emerald-600 text-slate-300 hover:text-white border border-slate-700/60 hover:border-emerald-500 transition-all shadow-xs"
+        {/* 5. ACTION */}
+        <td className="py-3 px-3.5 whitespace-nowrap text-right align-middle">
+          <div className="flex items-center justify-end gap-1.5">
+            {/* Open in Teams dedicated button */}
+            <button
+              type="button"
+              onClick={handleOpenInTeams}
+              className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-semibold text-[#292966] bg-[#CCCCFF]/30 hover:bg-[#CCCCFF]/60 border border-[#CCCCFF]/80 rounded-lg transition-all shadow-2xs active:scale-95"
+              title="Open in Microsoft Teams"
             >
-              <CalendarPlus className="w-3.5 h-3.5" />
-            </a>
+              <ExternalLink className="w-3.5 h-3.5 text-[#5C5C99]" />
+              <span>Teams</span>
+            </button>
+
+            {/* Quick Actions Menu */}
+            <div className="relative inline-block" ref={actionMenuRef}>
+              <button
+                type="button"
+                onClick={() => setIsMenuOpen(!isMenuOpen)}
+                className="p-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-500 hover:text-[#292966] transition-colors"
+                title="More options"
+              >
+                <MoreHorizontal className="w-3.5 h-3.5" />
+              </button>
+
+              {isMenuOpen && (
+                <div className="absolute right-0 mt-1 w-44 rounded-xl bg-white border border-slate-200 shadow-xl py-1 z-30 text-xs">
+                  <a
+                    href={googleCalUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    onClick={() => setIsMenuOpen(false)}
+                    className="flex items-center gap-2 px-3 py-2 text-slate-700 hover:bg-[#F8F9FD] hover:text-[#292966]"
+                  >
+                    <CalendarPlus className="w-3.5 h-3.5 text-[#5C5C99]" />
+                    <span>Add to Calendar</span>
+                  </a>
+                  {hasDescription && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsExpanded(!isExpanded);
+                        setIsMenuOpen(false);
+                      }}
+                      className="w-full text-left flex items-center gap-2 px-3 py-2 text-slate-700 hover:bg-[#F8F9FD] hover:text-[#292966]"
+                    >
+                      <FileText className="w-3.5 h-3.5 text-[#5C5C99]" />
+                      <span>{isExpanded ? 'Hide Details' : 'View Details'}</span>
+                    </button>
+                  )}
+                  <a
+                    href="https://teams.microsoft.com/v2/"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    onClick={() => setIsMenuOpen(false)}
+                    className="flex items-center gap-2 px-3 py-2 text-slate-700 hover:bg-[#F8F9FD] hover:text-[#292966]"
+                  >
+                    <ExternalLink className="w-3.5 h-3.5 text-[#5C5C99]" />
+                    <span>Teams Web Portal</span>
+                  </a>
+                </div>
+              )}
+            </div>
           </div>
         </td>
       </tr>
 
       {/* Expandable Details Drawer */}
       {isExpanded && hasDescription && (
-        <tr className="bg-[#0f172a]/70 border-b border-slate-800/80">
-          <td colSpan={6} className="px-5 py-3 text-xs text-slate-300">
-            <div className="rounded-lg bg-slate-950/60 p-3 border border-slate-800/70">
-              <div className="flex items-center justify-between gap-2 mb-1.5">
-                <span className="text-[11px] font-semibold text-indigo-400 uppercase tracking-wider">
-                  Instructions & Details
+        <tr className="bg-[#F8F9FD] border-b border-slate-200">
+          <td colSpan={6} className="px-5 py-3.5 text-xs text-[#292966]">
+            <div className="rounded-xl bg-white p-4 border border-slate-200/80 shadow-xs">
+              <div className="flex items-center justify-between gap-2 mb-2">
+                <span className="text-[11px] font-bold text-[#5C5C99] uppercase tracking-wider">
+                  Assignment Instructions &amp; Overview
                 </span>
                 {task.course_name && (
-                  <span className="text-[11px] text-slate-400">
-                    Course: <strong className="text-slate-200">{task.course_name}</strong>
+                  <span className="text-xs text-slate-500">
+                    Course: <strong className="text-[#292966]">{task.course_name}</strong>
                   </span>
                 )}
               </div>
-              <p className="whitespace-pre-wrap leading-relaxed text-slate-300">
+              <p className="whitespace-pre-wrap leading-relaxed text-slate-700 text-xs">
                 {task.description}
               </p>
             </div>
