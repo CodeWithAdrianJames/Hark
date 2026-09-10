@@ -46,7 +46,7 @@ export const TaskTableRow: React.FC<TaskTableRowProps> = ({
   });
 
   // Handler to bridge assignment navigation to Hark Chrome Extension or fallback cleanly
-  const handleOpenInTeams = (e: React.MouseEvent<HTMLAnchorElement>) => {
+  const handleOpenInTeams = async (e: React.MouseEvent<HTMLAnchorElement>) => {
     e.preventDefault();
     e.stopPropagation();
 
@@ -55,31 +55,33 @@ export const TaskTableRow: React.FC<TaskTableRowProps> = ({
       (typeof window !== 'undefined' ? localStorage.getItem('hark_local_extension_id')?.trim() : '') ||
       '';
 
-    const fallbackUrl = 'https://teams.microsoft.com/_#/assignments/';
-
     if (
       typeof window !== 'undefined' &&
-      window.chrome?.runtime?.sendMessage &&
+      (window as any).chrome?.runtime?.sendMessage &&
       extensionId
     ) {
       try {
-        window.chrome.runtime.sendMessage(
+        (window as any).chrome.runtime.sendMessage(
           extensionId,
           {
             type: 'NAVIGATE_TO_ASSIGNMENT',
-            assignmentId: task.assignment_id || null,
+            assignmentId: task.assignment_id || task.id,
+            classId: task.class_id,
             title: task.title,
           },
-          (response) => {
-            if (window.chrome?.runtime?.lastError || !response?.success) {
-              window.open(fallbackUrl, '_blank', 'noopener,noreferrer');
+          (response: any) => {
+            if ((window as any).chrome.runtime.lastError || !response?.success) {
+              // Fallback to Teams web
+              window.open('https://teams.microsoft.com/v2/', '_blank', 'noopener,noreferrer');
             }
           }
         );
-      } catch {
-        window.open(fallbackUrl, '_blank', 'noopener,noreferrer');
+        return;
+      } catch (err) {
+        console.warn('Extension message failed, falling back to direct URL', err);
       }
     }
+    window.open('https://teams.microsoft.com/v2/', '_blank', 'noopener,noreferrer');
   };
 
   // Dynamic urgency badge colors based on requirements:
@@ -247,11 +249,11 @@ export const TaskTableRow: React.FC<TaskTableRowProps> = ({
           <div className="flex items-center justify-end gap-1.5">
             {/* Open in Teams / Portal */}
             <a
-              href="https://teams.microsoft.com/_#/assignments/"
+              href="https://teams.microsoft.com/v2/"
               target="_blank"
               rel="noopener noreferrer"
               className="inline-flex items-center justify-center p-1.5 rounded-lg bg-slate-800/80 hover:bg-indigo-600 text-slate-300 hover:text-white border border-slate-700/60 hover:border-indigo-500 transition-all shadow-xs"
-              title="Open Assignment in Teams / Portal"
+              title="Open Assignment in Teams"
               onClick={handleOpenInTeams}
             >
               <ExternalLink className="w-3.5 h-3.5" />

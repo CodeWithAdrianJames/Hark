@@ -51,7 +51,8 @@ export async function GET(req: NextRequest) {
         t.status,
         t.created_at,
         c.code AS course_code,
-        c.name AS course_name
+        c.name AS course_name,
+        c.channel_id AS class_id
       FROM tasks t
       LEFT JOIN courses c ON t.course_id = c.id
       WHERE t.user_id = ${userId}::uuid

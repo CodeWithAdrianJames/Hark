@@ -199,8 +199,8 @@ async function verify() {
         ${item.title},
         ${item.dueIso}::timestamptz,
         'official_assignment',
-        'https://teams.microsoft.com/_#/assignments/',
-        'https://teams.microsoft.com/_#/assignments/',
+        'https://teams.microsoft.com/v2/',
+        'https://teams.microsoft.com/v2/',
         ${item.assignmentId || null},
         ${rawHash},
         'pending'

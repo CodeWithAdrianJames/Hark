@@ -749,7 +749,7 @@ export async function POST(req: NextRequest) {
         ).trim() || null;
 
         // Universal tenant-agnostic fallback for deep_link:
-        const deepLink = 'https://teams.microsoft.com/_#/assignments/';
+        const deepLink = 'https://teams.microsoft.com/v2/';
         const description = item.description?.trim() || null;
 
         const result = await sql`
@@ -832,7 +832,8 @@ export async function POST(req: NextRequest) {
           t.status,
           t.created_at,
           c.code AS course_code,
-          c.name AS course_name
+          c.name AS course_name,
+          c.channel_id AS class_id
         FROM tasks t
         LEFT JOIN courses c ON t.course_id = c.id
         WHERE t.user_id = ${userId}::uuid

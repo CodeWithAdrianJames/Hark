@@ -20,12 +20,13 @@
   },
   "externally_connectable": {
     "matches": [
+      "http://localhost:3000/*",
+      "https://*.vercel.app/*",
       "http://localhost/*",
       "http://localhost:*/*",
       "http://127.0.0.1/*",
       "http://127.0.0.1:*/*",
       "https://localhost/*",
-      "https://*.vercel.app/*",
       "https://your-production-domain.com/*"
     ]
   },

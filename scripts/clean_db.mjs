@@ -56,7 +56,7 @@ const REAL_DELIVERABLES = [
     canonicalDueIso: '2026-09-06T17:00:00.000Z', // Sep 7, 2026, 1:00 AM (UTC+8)
     rawDueString: 'Sep 7, 2026 1:00 AM',
     assignmentId: 'abf580cd-830a-41f4-b7b0-4af1e96104df',
-    portalUrl: 'https://teams.microsoft.com/_#/assignments/',
+    portalUrl: 'https://teams.microsoft.com/v2/',
   },
   {
     titlePattern: '5 prelim',
@@ -65,7 +65,7 @@ const REAL_DELIVERABLES = [
     courseBadge: '[CSIT321G1]',
     canonicalDueIso: '2026-09-06T17:30:00.000Z', // Sep 7, 2026, 1:30 AM (UTC+8)
     rawDueString: 'Sep 7, 2026 1:30 AM',
-    portalUrl: 'https://teams.microsoft.com/_#/assignments/',
+    portalUrl: 'https://teams.microsoft.com/v2/',
   },
   {
     titlePattern: 'final proposal',
@@ -74,7 +74,7 @@ const REAL_DELIVERABLES = [
     courseBadge: '[IT317]',
     canonicalDueIso: '2026-09-08T15:59:59.000Z', // Sep 8, 2026, 11:59 PM (UTC+8)
     rawDueString: 'Sep 8, 2026 11:59 PM',
-    portalUrl: 'https://teams.microsoft.com/_#/assignments/',
+    portalUrl: 'https://teams.microsoft.com/v2/',
   },
   {
     titlePattern: 'research assignment',
@@ -83,7 +83,7 @@ const REAL_DELIVERABLES = [
     courseBadge: '[IT365]',
     canonicalDueIso: '2026-09-12T15:59:59.000Z', // Sep 12, 2026, 11:59 PM (UTC+8)
     rawDueString: 'Sep 12, 2026 11:59 PM',
-    portalUrl: 'https://teams.microsoft.com/_#/assignments/',
+    portalUrl: 'https://teams.microsoft.com/v2/',
   },
   {
     titlePattern: 'acquaintance party attendance',
@@ -92,7 +92,7 @@ const REAL_DELIVERABLES = [
     courseBadge: '[CSIT321G1]',
     canonicalDueIso: '2026-09-13T15:59:59.000Z', // Sep 13, 2026, 11:59 PM (UTC+8)
     rawDueString: 'Sep 13, 2026 11:59 PM',
-    portalUrl: 'https://teams.microsoft.com/_#/assignments/',
+    portalUrl: 'https://teams.microsoft.com/v2/',
   },
   {
     titlePattern: 'acquaintance party bonus',
@@ -101,7 +101,7 @@ const REAL_DELIVERABLES = [
     courseBadge: '[IT317]',
     canonicalDueIso: '2026-09-30T15:59:59.000Z', // Sep 30, 2026, 11:59 PM (UTC+8)
     rawDueString: 'Sep 30, 2026 11:59 PM',
-    portalUrl: 'https://teams.microsoft.com/_#/assignments/',
+    portalUrl: 'https://teams.microsoft.com/v2/',
   },
 ];
 
@@ -194,8 +194,8 @@ async function runClean() {
           'Extracted from MS Teams EDU Assignments Hub',
           ${def.canonicalDueIso}::timestamptz,
           'official_assignment',
-          'https://teams.microsoft.com/_#/assignments/',
-          'https://teams.microsoft.com/_#/assignments/',
+          'https://teams.microsoft.com/v2/',
+          'https://teams.microsoft.com/v2/',
           ${def.assignmentId || null},
           ${canonicalHash},
           'pending'
@@ -231,7 +231,7 @@ async function runClean() {
         }
       }
 
-      const finalUrl = 'https://teams.microsoft.com/_#/assignments/';
+      const finalUrl = 'https://teams.microsoft.com/v2/';
 
       // Update best match to canonical due date, course, assignment_id, universal deep link, and hash
       await sql`

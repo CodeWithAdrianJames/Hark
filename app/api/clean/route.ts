@@ -168,7 +168,7 @@ async function performDatabaseClean(targetUserId: string) {
       // Update best match to canonical due date, course, canonical hash, and specific deep link
       const canonicalHash = computeCanonicalTaskHash(targetUserId, def.courseCode, def.canonicalTitle);
       const courseId = courseMap.get(normalizeCourseCode(def.courseCode)) || bestMatch.course_id;
-      const finalUrl = 'https://teams.microsoft.com/_#/assignments/';
+      const finalUrl = 'https://teams.microsoft.com/v2/';
 
       await sql`
         UPDATE tasks

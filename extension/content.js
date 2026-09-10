@@ -1301,8 +1301,15 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
       }
 
       // 3. Extension-driven tab & card focus bridge
-      if (request && request.type === 'FOCUS_AND_CLICK_CARD') {
-        const found = focusAndClickAssignmentCard(request.assignmentId, request.title);
+      if (
+        request &&
+        (request.type === 'HARK_FOCUS_ASSIGNMENT' || request.type === 'FOCUS_AND_CLICK_CARD')
+      ) {
+        const found = focusAndClickAssignmentCard(
+          request.assignmentId,
+          request.title,
+          request.classId
+        );
         sendResponse({ success: true, found });
         return false;
       }
@@ -1313,55 +1320,56 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
    * Helper: Locate and focus/click an assignment card by ID or title in current document,
    * or broadcast to child iframes if rendered within an embedded frame.
    */
-  function focusAndClickAssignmentCard(assignmentId, title) {
-    log('[Hark] Received FOCUS_AND_CLICK_CARD request for:', assignmentId, title);
+  function focusAndClickAssignmentCard(assignmentId, title, classId) {
+    log('[Hark] Received HARK_FOCUS_ASSIGNMENT request for:', { assignmentId, title, classId });
 
     try {
-      let targetCard = null;
+      let target = null;
 
       if (assignmentId) {
-        targetCard =
+        target =
           document.getElementById(assignmentId) ||
-          document.querySelector(`[id="${assignmentId}"]`) ||
-          document.querySelector(`[data-test="assignment-card"][id="${assignmentId}"]`) ||
+          document.querySelector(`div[data-test="assignment-card"][id="${assignmentId}"]`) ||
+          document.querySelector(`[data-testid="${assignmentId}"]`) ||
           document.querySelector(`[data-assignment-id="${assignmentId}"]`) ||
-          document.querySelector(`[data-item-id="${assignmentId}"]`);
+          document.querySelector(`[data-item-id="${assignmentId}"]`) ||
+          document.querySelector(`[id="${assignmentId}"]`);
       }
 
       // Fallback: match by title text if ID is not immediately found
-      if (!targetCard && title) {
-        const candidateCards = document.querySelectorAll(
-          'div[data-test="assignment-card"], [data-test="assignment-card"], [role="row"], [role="listitem"], [data-tid*="assignment"]'
+      if (!target && title) {
+        const candidateCards = Array.from(
+          document.querySelectorAll(
+            'div[data-test="assignment-card"], [data-test="assignment-card"], [data-tid*="assignment"], [role="row"], [role="listitem"]'
+          )
         );
-        for (const c of candidateCards) {
-          if (c.textContent && c.textContent.includes(title)) {
-            targetCard = c;
-            break;
-          }
-        }
+        target =
+          candidateCards.find(
+            (el) => el.textContent && el.textContent.includes(title)
+          ) || null;
       }
 
-      if (targetCard) {
-        log('[Hark] Found target card. Scrolling into view and clicking:', targetCard);
-        targetCard.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      if (target) {
+        log('[Hark] Found target assignment card. Scrolling into view and clicking:', target);
+        target.scrollIntoView({ behavior: 'smooth', block: 'center' });
 
-        // Highlight card with rich pulse
-        const originalOutline = targetCard.style.outline;
-        const originalBoxShadow = targetCard.style.boxShadow;
-        const originalTransition = targetCard.style.transition;
-        targetCard.style.transition = 'all 0.3s ease';
-        targetCard.style.outline = '2px solid #6366f1';
-        targetCard.style.boxShadow = '0 0 20px rgba(99, 102, 241, 0.6)';
+        // Flash a temporary subtle highlight border around the card
+        const originalOutline = target.style.outline;
+        const originalBoxShadow = target.style.boxShadow;
+        const originalTransition = target.style.transition;
+        target.style.transition = 'all 0.3s ease';
+        target.style.outline = '2px solid #6366f1';
+        target.style.boxShadow = '0 0 20px rgba(99, 102, 241, 0.6)';
 
         setTimeout(() => {
-          targetCard.style.outline = originalOutline;
-          targetCard.style.boxShadow = originalBoxShadow;
-          targetCard.style.transition = originalTransition;
+          target.style.outline = originalOutline;
+          target.style.boxShadow = originalBoxShadow;
+          target.style.transition = originalTransition;
         }, 2500);
 
-        // Click card or its primary clickable button/anchor
+        // Dispatch click on interactive element or card itself
         const clickable =
-          targetCard.querySelector('button, a, [role="button"]') || targetCard;
+          target.querySelector('button, a, [role="button"]') || target;
         clickable.click();
         return true;
       }
@@ -1369,13 +1377,16 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
       // If in top frame, broadcast to all child iframes (e.g. assignments.edu.cloud.microsoft)
       const iframes = document.querySelectorAll('iframe');
       if (iframes.length > 0) {
-        log(`[Hark] Card not in current frame. Broadcasting FOCUS_AND_CLICK_CARD to ${iframes.length} iframe(s)...`);
+        log(
+          `[Hark] Card not in current frame. Broadcasting HARK_FOCUS_ASSIGNMENT to ${iframes.length} iframe(s)...`
+        );
         iframes.forEach((ifr) => {
           try {
             ifr.contentWindow?.postMessage(
               {
-                type: 'HARK_FOCUS_AND_CLICK_CARD',
+                type: 'HARK_FOCUS_ASSIGNMENT',
                 assignmentId,
+                classId,
                 title,
               },
               '*'
@@ -1386,13 +1397,13 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
         });
       }
 
-      // If in top frame and not on assignments page, show toast
+      // If in top frame and not on assignments page or card not found
       if (window.top === window.self && !location.href.includes('assignments')) {
         showHarkToast(
           `Assignment "${title || assignmentId}" is in your Teams Assignments. Opening Assignments Hub...`
         );
         const assignmentsNav = document.querySelector(
-          'button#app-bar-2a84b049-50bc-4535-a646-5677a8207868, button[aria-label*="Assignments"], a[aria-label*="Assignments"]'
+          'button#app-bar-2a84b049-50bc-4535-a646-5677a8207868, button[aria-label*="Assignments" i], a[aria-label*="Assignments" i], [data-tid*="app-bar-assignments"], [data-tid*="assignments"]'
         );
         if (assignmentsNav) {
           assignmentsNav.click();
@@ -1450,12 +1461,56 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
     }
   }
 
-  // Cross-frame message relay for FOCUS_AND_CLICK_CARD
+  // Cross-frame message relay for HARK_FOCUS_ASSIGNMENT & legacy HARK_FOCUS_AND_CLICK_CARD
   window.addEventListener('message', (event) => {
-    if (event.data?.type === 'HARK_FOCUS_AND_CLICK_CARD') {
-      focusAndClickAssignmentCard(event.data.assignmentId, event.data.title);
+    if (
+      event.data?.type === 'HARK_FOCUS_ASSIGNMENT' ||
+      event.data?.type === 'HARK_FOCUS_AND_CLICK_CARD'
+    ) {
+      focusAndClickAssignmentCard(
+        event.data.assignmentId,
+        event.data.title,
+        event.data.classId
+      );
     }
   });
+
+  /**
+   * Helper: Check and resolve any pending navigation target stored in chrome.storage.local
+   * when Teams v2 or an assignments iframe finishes loading.
+   */
+  function checkAndResolvePendingNavigation() {
+    try {
+      chrome.storage?.local?.get(['pendingNavigationTarget'], (res) => {
+        const pending = res?.pendingNavigationTarget;
+        if (
+          pending &&
+          pending.assignmentId &&
+          Date.now() - (pending.timestamp || 0) < 120000
+        ) {
+          log('[Hark] Detected pending navigation target:', pending);
+          let attempts = 0;
+          const interval = setInterval(() => {
+            attempts++;
+            const found = focusAndClickAssignmentCard(
+              pending.assignmentId,
+              pending.title,
+              pending.classId
+            );
+            if (found || attempts >= 10) {
+              clearInterval(interval);
+              if (found) {
+                log('[Hark] Successfully resolved pending navigation target:', pending.assignmentId);
+                chrome.storage.local.remove(['pendingNavigationTarget']);
+              }
+            }
+          }, 1200);
+        }
+      });
+    } catch {
+      // ignore
+    }
+  }
 
   /**
    * Helper: Extracts text lines from a DOM subtree with strict newline separation
@@ -2312,6 +2367,8 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
     });
 
     loadSettingsAndCache().then(() => {
+      checkAndResolvePendingNavigation();
+
       // Immediate initial scans after DOM renders
       setTimeout(() => {
         scanEduAssignmentsHub();
@@ -2356,6 +2413,8 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
     });
 
     loadSettingsAndCache().then(() => {
+      checkAndResolvePendingNavigation();
+
       // Initial scan after DOM renders
       setTimeout(() => {
         scanIframeAssignments();
@@ -2381,6 +2440,8 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
     injectNetworkInterceptor();
 
     loadSettingsAndCache().then(() => {
+      checkAndResolvePendingNavigation();
+
       if (!config.userId) {
         logWarn('User ID not set. Open Hark popup to configure your User ID.');
         return;

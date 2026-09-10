@@ -24,6 +24,7 @@ export interface TaskItem {
   source_url: string | null;
   deep_link?: string | null;
   assignment_id?: string | null;
+  class_id?: string | null;
   raw_message_hash: string | null;
   status: 'pending' | 'in_progress' | 'completed';
   created_at: string;
@@ -162,7 +163,7 @@ export const TaskCard: React.FC<TaskCardProps> = ({
       {/* Bottom Action Buttons: Deep Link + Calendar Intent */}
       <div className="flex items-center justify-between pt-3 border-t border-slate-800/80 mt-auto gap-2">
         {(() => {
-          const handleOpenInTeams = (e: React.MouseEvent<HTMLAnchorElement>) => {
+          const handleOpenInTeams = async (e: React.MouseEvent<HTMLAnchorElement>) => {
             e.preventDefault();
             e.stopPropagation();
 
@@ -171,41 +172,41 @@ export const TaskCard: React.FC<TaskCardProps> = ({
               (typeof window !== 'undefined' ? localStorage.getItem('hark_local_extension_id')?.trim() : '') ||
               '';
 
-            const fallbackUrl = 'https://teams.microsoft.com/_#/assignments/';
-
             if (
               typeof window !== 'undefined' &&
-              window.chrome?.runtime?.sendMessage &&
+              (window as any).chrome?.runtime?.sendMessage &&
               extensionId
             ) {
               try {
-                window.chrome.runtime.sendMessage(
+                (window as any).chrome.runtime.sendMessage(
                   extensionId,
                   {
                     type: 'NAVIGATE_TO_ASSIGNMENT',
-                    assignmentId: task.assignment_id || null,
+                    assignmentId: task.assignment_id || task.id,
+                    classId: task.class_id,
                     title: task.title,
                   },
-                  (response) => {
-                    if (window.chrome?.runtime?.lastError || !response?.success) {
-                      window.open(fallbackUrl, '_blank', 'noopener,noreferrer');
+                  (response: any) => {
+                    if ((window as any).chrome.runtime.lastError || !response?.success) {
+                      // Fallback to Teams web
+                      window.open('https://teams.microsoft.com/v2/', '_blank', 'noopener,noreferrer');
                     }
                   }
                 );
-              } catch {
-                window.open(fallbackUrl, '_blank', 'noopener,noreferrer');
+                return;
+              } catch (err) {
+                console.warn('Extension message failed, falling back to direct URL', err);
               }
-            } else {
-              window.open(fallbackUrl, '_blank', 'noopener,noreferrer');
             }
+            window.open('https://teams.microsoft.com/v2/', '_blank', 'noopener,noreferrer');
           };
 
           return (
             <a
-              href="https://teams.microsoft.com/_#/assignments/"
+              href="https://teams.microsoft.com/v2/"
               target="_blank"
               rel="noopener noreferrer"
-              title="Open Assignment in Teams / Portal"
+              title="Open Assignment in Teams"
               onClick={handleOpenInTeams}
               className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-400 hover:text-indigo-300 transition-colors group/link"
             >

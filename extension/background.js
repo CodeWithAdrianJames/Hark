@@ -167,7 +167,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   // 2. Relay NAVIGATE_TO_ASSIGNMENT from internal components
   if (message?.type === 'NAVIGATE_TO_ASSIGNMENT') {
-    navigateToAssignmentInTeams(message.assignmentId, message.title, sendResponse);
+    handleNavigateToAssignment(message, sendResponse);
     return true;
   }
 
@@ -356,7 +356,7 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
 
   // 5. Extension-driven tab & card focus bridge
   if (message.type === 'NAVIGATE_TO_ASSIGNMENT') {
-    navigateToAssignmentInTeams(message.assignmentId, message.title, sendResponse);
+    handleNavigateToAssignment(message, sendResponse);
     return true;
   }
 
@@ -366,88 +366,91 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
 });
 
 /**
- * Helper: Find open Microsoft Teams / EDU Assignments tab, activate & focus it,
- * and dispatch FOCUS_AND_CLICK_CARD to the tab's content script.
- * If no open Teams tab exists, opens https://teams.microsoft.com/_#/assignments/ in a new tab.
+ * Background Worker Navigation Bridge:
+ * Query existing tabs for URL patterns matching: "*://teams.microsoft.com/*".
+ * If Teams tab exists:
+ *   1. Activate and focus tab & window.
+ *   2. Send HARK_FOCUS_ASSIGNMENT message to Teams content script.
+ *   3. Respond with { success: true, method: "tab_focus" }.
+ * If no Teams tab exists:
+ *   1. Open new tab to "https://teams.microsoft.com/v2/".
+ *   2. Store pending navigation target in chrome.storage.local.
+ *   3. Respond with { success: true, method: "tab_created" }.
  */
-function navigateToAssignmentInTeams(assignmentId, title, sendResponse) {
-  console.log('[Hark Background] Navigating to assignment:', assignmentId, title);
+async function handleNavigateToAssignment(request, sendResponse) {
+  console.log('[Hark Background] Navigating to assignment:', request);
+  const assignmentId = request.assignmentId || request.id || null;
+  const classId = request.classId || request.course_id || null;
+  const title = request.title || '';
 
-  chrome.tabs.query(
-    {
-      url: [
-        '*://teams.microsoft.com/*',
-        '*://*.teams.microsoft.com/*',
-        'https://assignments.edu.cloud.microsoft/*',
-        'https://*.assignments.edu.cloud.microsoft/*',
-      ],
-    },
-    (tabs) => {
-      if (tabs && tabs.length > 0) {
-        // Prioritize active tab, then tabs with assignments in URL
-        const targetTab =
-          tabs.find((t) => t.active) ||
-          tabs.find((t) => t.url && t.url.includes('assignments')) ||
-          tabs[0];
+  try {
+    const tabs = await chrome.tabs.query({
+      url: ['*://teams.microsoft.com/*'],
+    });
 
-        console.log(
-          `[Hark Background] Found open Teams tab (${targetTab.id}: ${targetTab.url}). Activating and focusing...`
-        );
+    if (tabs && tabs.length > 0) {
+      // Prioritize active tab, then tabs with assignments in URL
+      const teamsTab =
+        tabs.find((t) => t.active) ||
+        tabs.find((t) => t.url && t.url.includes('assignments')) ||
+        tabs[0];
 
-        // 1. Activate tab
-        chrome.tabs.update(targetTab.id, { active: true }, () => {
-          // 2. Focus window
-          if (targetTab.windowId) {
-            chrome.windows.update(targetTab.windowId, { focused: true });
-          }
+      console.log(
+        `[Hark Background] Found open Teams tab (${teamsTab.id}: ${teamsTab.url}). Activating and focusing...`
+      );
 
-          // 3. Send message to tab content script
-          chrome.tabs.sendMessage(
-            targetTab.id,
-            {
-              type: 'FOCUS_AND_CLICK_CARD',
-              assignmentId,
-              title,
-            },
-            (contentResponse) => {
-              if (chrome.runtime.lastError) {
-                console.warn(
-                  '[Hark Background] Note delivering FOCUS_AND_CLICK_CARD to tab:',
-                  chrome.runtime.lastError.message
-                );
-              }
-              console.log(
-                '[Hark Background] FOCUS_AND_CLICK_CARD content script response:',
-                contentResponse
-              );
-              sendResponse({
-                success: true,
-                action: 'focused_tab',
-                tabId: targetTab.id,
-                contentResponse,
-              });
-            }
-          );
-        });
-      } else {
-        // Teams not open: open a new tab directly to the assignments hub
-        console.log(
-          '[Hark Background] No open Teams tab found. Opening https://teams.microsoft.com/_#/assignments/...'
-        );
-        chrome.tabs.create(
-          {
-            url: 'https://teams.microsoft.com/_#/assignments/',
-            active: true,
-          },
-          (newTab) => {
-            sendResponse({
-              success: true,
-              action: 'opened_new_tab',
-              tabId: newTab.id,
-            });
-          }
-        );
+      // 1. Activate tab and focus window
+      await chrome.tabs.update(teamsTab.id, { active: true });
+      if (teamsTab.windowId) {
+        await chrome.windows.update(teamsTab.windowId, { focused: true });
       }
+
+      // 2. Send HARK_FOCUS_ASSIGNMENT to content script
+      chrome.tabs.sendMessage(
+        teamsTab.id,
+        {
+          type: 'HARK_FOCUS_ASSIGNMENT',
+          assignmentId,
+          classId,
+          title,
+        },
+        (contentResponse) => {
+          if (chrome.runtime.lastError) {
+            console.warn(
+              '[Hark Background] Note delivering HARK_FOCUS_ASSIGNMENT to tab:',
+              chrome.runtime.lastError.message
+            );
+          } else {
+            console.log('[Hark Background] Content response from Teams tab:', contentResponse);
+          }
+        }
+      );
+
+      sendResponse({ success: true, method: 'tab_focus' });
+    } else {
+      // No Teams tab open: store pending navigation target and open https://teams.microsoft.com/v2/
+      console.log(
+        '[Hark Background] No open Teams tab found. Saving pending target and opening https://teams.microsoft.com/v2/...'
+      );
+
+      await chrome.storage.local.set({
+        pendingNavigationTarget: {
+          assignmentId,
+          classId,
+          title,
+          timestamp: Date.now(),
+        },
+      });
+
+      await chrome.tabs.create({
+        url: 'https://teams.microsoft.com/v2/',
+        active: true,
+      });
+
+      sendResponse({ success: true, method: 'tab_created' });
     }
-  );
+  } catch (err) {
+    console.error('[Hark Background] Error handling NAVIGATE_TO_ASSIGNMENT:', err);
+    sendResponse({ success: false, error: err.message });
+  }
 }
