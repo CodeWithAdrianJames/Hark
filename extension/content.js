@@ -184,6 +184,9 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
       !lowerFinal ||
       lowerFinal === 'teams' ||
       lowerFinal === 'general' ||
+      lowerFinal === 'main' ||
+      lowerFinal === 'main channels' ||
+      lowerFinal === 'teams and channels' ||
       lowerFinal === 'microsoft teams' ||
       lowerFinal === 'conversations' ||
       lowerFinal === 'chat' ||
@@ -202,6 +205,7 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
   function extractCourseBadge(rawName) {
     if (!rawName || typeof rawName !== 'string') return '[GENERAL]';
     const clean = rawName.replace(/^\[+|\]+$/g, '').trim();
+    if (/^(?:main|main channels|teams and channels)$/i.test(clean)) return '[GENERAL]';
 
     const csitMatch = clean.match(/\b(CSIT\d{2,4}[A-Z0-9]*)\b/i);
     if (csitMatch) return `[${csitMatch[1].toUpperCase()}]`;
@@ -229,6 +233,7 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
   /**
    * Ground-truth extraction of active Team Name and Channel Name directly from Teams DOM.
    * Avoids hallucinated or generic names.
+   * Strictly ignores hidden teams and archived courses.
    */
   function getVerifiedTeamAndCourseContext() {
     let resolvedTeamName = '';
@@ -272,6 +277,22 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
       );
 
       if (activeChannelNode) {
+        // Strictly ignore archived classes or hidden teams
+        const isHiddenOrArchived =
+          Boolean(activeChannelNode.closest('[aria-hidden="true"]')) ||
+          Boolean(activeChannelNode.closest('[data-tid*="hidden"], [data-tid*="archived"]')) ||
+          Boolean(activeChannelNode.closest('[aria-label*="hidden" i], [aria-label*="archived" i]'));
+
+        if (isHiddenOrArchived) {
+          return {
+            teamName: '',
+            courseName: '',
+            courseCode: '',
+            channelName: '',
+            isArchivedOrHidden: true,
+          };
+        }
+
         if (!resolvedChannelName) {
           resolvedChannelName = activeChannelNode.textContent?.trim() || '';
         }
@@ -282,12 +303,20 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
         );
 
         if (teamParent) {
-          const titleEl = teamParent.querySelector(
-            '[data-tid*="team-name"], [data-tid*="team-title"], h3, [role="heading"], button[aria-expanded]'
-          );
-          if (titleEl && titleEl.textContent.trim()) {
-            const candidate = cleanCourseOrTeamName(titleEl.textContent);
-            if (candidate) resolvedTeamName = candidate;
+          // Verify parent team is not marked as hidden or archived
+          const parentHidden =
+            teamParent.getAttribute('aria-hidden') === 'true' ||
+            teamParent.closest('[data-tid*="hidden"], [data-tid*="archived"]') ||
+            teamParent.closest('[aria-label*="hidden" i], [aria-label*="archived" i]');
+
+          if (!parentHidden) {
+            const titleEl = teamParent.querySelector(
+              '[data-tid*="team-name"], [data-tid*="team-title"], h3, [role="heading"], button[aria-expanded]'
+            );
+            if (titleEl && titleEl.textContent.trim()) {
+              const candidate = cleanCourseOrTeamName(titleEl.textContent);
+              if (candidate) resolvedTeamName = candidate;
+            }
           }
         }
 
@@ -320,7 +349,9 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
     }
 
     resolvedChannelName = resolvedChannelName || 'General';
-    resolvedTeamName = resolvedTeamName || resolvedChannelName || 'MS Teams Course';
+    if (!resolvedTeamName || resolvedTeamName === 'MS Teams Course' || resolvedTeamName === 'Main Channels' || resolvedTeamName === 'MAIN') {
+      resolvedTeamName = resolvedChannelName !== 'General' ? resolvedChannelName : 'General';
+    }
 
     const courseCode = extractCourseCode(resolvedTeamName);
 
@@ -329,6 +360,7 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
       courseName: resolvedTeamName,
       courseCode: courseCode,
       channelName: resolvedChannelName,
+      isArchivedOrHidden: false,
     };
   }
 
@@ -1691,83 +1723,122 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
      */
     function getAssignmentFiberDetails(card) {
       try {
+        // 1. Check if stamped by edu_fiber.js page-context extractor
+        const classId =
+          card.getAttribute?.('data-hark-class-id') || card.dataset?.harkClassId || '';
+        const assignmentId =
+          card.getAttribute?.('data-hark-assignment-id') || card.dataset?.harkAssignmentId || '';
+        const stampedTitle =
+          card.getAttribute?.('data-hark-title') || card.dataset?.harkTitle || '';
+        const stampedClassName =
+          card.getAttribute?.('data-hark-class-name') || card.dataset?.harkClassName || '';
+        const stampedDueDate =
+          card.getAttribute?.('data-hark-due-date') || card.dataset?.harkDueDate || '';
+        const stampedPortalUrl =
+          card.getAttribute?.('data-hark-portal-url') ||
+          card.getAttribute?.('data-hark-fiber-deeplink') ||
+          card.dataset?.harkFiberDeeplink;
+        const stampedTeamsLink =
+          card.getAttribute?.('data-hark-teams-link') || card.dataset?.harkTeamsLink;
+
         const fiberKey = Object.keys(card).find(
           (k) => k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance')
         );
-        if (!fiberKey) {
-          // Check if stamped by edu_fiber.js page-context extractor
-          const classId =
-            card.getAttribute?.('data-hark-class-id') || card.dataset?.harkClassId || '';
-          const assignmentId =
-            card.getAttribute?.('data-hark-assignment-id') || card.dataset?.harkAssignmentId || '';
-          const stampedPortalUrl =
-            card.getAttribute?.('data-hark-portal-url') ||
-            card.getAttribute?.('data-hark-fiber-deeplink') ||
-            card.dataset?.harkFiberDeeplink;
-          const stampedTeamsLink =
-            card.getAttribute?.('data-hark-teams-link') || card.dataset?.harkTeamsLink;
 
-          if (classId && assignmentId) {
-            const directPortalUrl = `https://assignments.edu.cloud.microsoft/classes/${classId}/assignments/${assignmentId}`;
-            const teamsAppDeepLink = `https://teams.microsoft.com/l/entity/2a84b049-50bc-4535-a646-5677a8207868/classroom?context=${encodeURIComponent(
-              JSON.stringify({
-                subEntityId: `assignment_${assignmentId}`,
-                channelId: classId,
-              })
-            )}`;
+        let extractedTitle = stampedTitle || null;
+        let extractedClassName = stampedClassName || null;
+        let extractedDueDate = stampedDueDate || null;
+        let extractedClassId = classId || null;
+        let extractedAssignmentId = assignmentId || null;
 
-            return {
-              classId,
-              assignmentId,
-              directPortalUrl,
-              teamsAppDeepLink,
-              deepLink: directPortalUrl,
-            };
-          }
-
-          if (stampedPortalUrl) {
-            return {
-              classId: classId || '',
-              assignmentId: assignmentId || '',
-              directPortalUrl: stampedPortalUrl,
-              teamsAppDeepLink: stampedTeamsLink || null,
-              deepLink: stampedPortalUrl,
-            };
-          }
-
-          // Check child element if card itself doesn't directly expose the fiber key
-          const childWithFiber = card.querySelector && card.querySelector('*');
-          if (childWithFiber) {
-            return getAssignmentFiberDetails(childWithFiber);
-          }
-          return null;
-        }
-        let cur = card[fiberKey];
-        while (cur) {
-          const p = cur.memoizedProps;
-          const candidate = p?.assignment || p?.item || p?.cardData || p;
-          if (candidate && (candidate.classId || candidate.courseId)) {
-            const classId = candidate.classId || candidate.courseId;
-            const assignmentId = candidate.id || card.id;
-            if (classId && assignmentId) {
-              const directPortalUrl = `https://assignments.edu.cloud.microsoft/classes/${classId}/assignments/${assignmentId}`;
-              const teamsAppDeepLink = `https://teams.microsoft.com/l/entity/2a84b049-50bc-4535-a646-5677a8207868/classroom?context=${encodeURIComponent(
-                JSON.stringify({
-                  subEntityId: `assignment_${assignmentId}`,
-                  channelId: classId,
-                })
-              )}`;
-
-              return {
-                classId,
-                assignmentId,
-                directPortalUrl,
-                teamsAppDeepLink,
-                deepLink: directPortalUrl,
-              };
+        if (fiberKey) {
+          let cur = card[fiberKey];
+          while (cur) {
+            const p = cur.memoizedProps;
+            const candidate = p?.assignment || p?.item || p?.cardData || p;
+            if (candidate) {
+              if (!extractedTitle) {
+                extractedTitle =
+                  candidate.displayName ||
+                  candidate.title ||
+                  candidate.name ||
+                  candidate.assignmentTitle ||
+                  null;
+              }
+              if (!extractedClassName) {
+                extractedClassName =
+                  candidate.className ||
+                  candidate.classDetails?.displayName ||
+                  candidate.courseName ||
+                  null;
+              }
+              if (!extractedDueDate) {
+                extractedDueDate = candidate.dueDateTime || candidate.dueDate || null;
+              }
+              if (!extractedClassId) {
+                extractedClassId =
+                  candidate.classId || candidate.courseId || candidate.classDetails?.id || null;
+              }
+              if (!extractedAssignmentId) {
+                extractedAssignmentId =
+                  candidate.id || card.id || candidate.assignmentId || null;
+              }
             }
+            cur = cur.return;
           }
-          cur = cur.return;
+        }
+
+        if (extractedClassId && extractedAssignmentId) {
+          const directPortalUrl = `https://assignments.edu.cloud.microsoft/classes/${extractedClassId}/assignments/${extractedAssignmentId}`;
+          const teamsAppDeepLink = `https://teams.microsoft.com/l/entity/2a84b049-50bc-4535-a646-5677a8207868/classroom?context=${encodeURIComponent(
+            JSON.stringify({
+              subEntityId: `assignment_${extractedAssignmentId}`,
+              channelId: extractedClassId,
+            })
+          )}`;
+
+          return {
+            classId: String(extractedClassId),
+            assignmentId: String(extractedAssignmentId),
+            title: extractedTitle ? String(extractedTitle).trim() : null,
+            className: extractedClassName ? String(extractedClassName).trim() : null,
+            dueDate: extractedDueDate ? String(extractedDueDate).trim() : null,
+            directPortalUrl,
+            teamsAppDeepLink,
+            deepLink: directPortalUrl,
+          };
+        }
+
+        if (stampedPortalUrl) {
+          return {
+            classId: extractedClassId || '',
+            assignmentId: extractedAssignmentId || '',
+            title: extractedTitle ? String(extractedTitle).trim() : null,
+            className: extractedClassName ? String(extractedClassName).trim() : null,
+            dueDate: extractedDueDate ? String(extractedDueDate).trim() : null,
+            directPortalUrl: stampedPortalUrl,
+            teamsAppDeepLink: stampedTeamsLink || null,
+            deepLink: stampedPortalUrl,
+          };
+        }
+
+        // Check child element if card itself doesn't directly expose the fiber key
+        const childWithFiber = card.querySelector && card.querySelector('*');
+        if (childWithFiber) {
+          return getAssignmentFiberDetails(childWithFiber);
+        }
+
+        if (extractedTitle || extractedClassName || extractedAssignmentId) {
+          return {
+            classId: extractedClassId || '',
+            assignmentId: extractedAssignmentId || '',
+            title: extractedTitle ? String(extractedTitle).trim() : null,
+            className: extractedClassName ? String(extractedClassName).trim() : null,
+            dueDate: extractedDueDate ? String(extractedDueDate).trim() : null,
+            directPortalUrl: null,
+            teamsAppDeepLink: null,
+            deepLink: null,
+          };
         }
       } catch (e) {
         console.warn('[Hark] Fiber extraction failed:', e);
@@ -1968,23 +2039,62 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
 
       const activeDateHeader = findPrecedingDateHeader(card);
 
+      // 0. Primary Fiber Details extraction
+      const fiberDetails = getAssignmentFiberDetails(card);
+
       let title = '';
       let courseName = '';
       let timeString = '';
 
-      // Direct DOM queries for precise elements
-      const titleEl = card.querySelector(
-        '[data-tid*="title"], [class*="title" i], [role="heading"], h2, h3, h4, strong'
-      );
-      if (titleEl) {
-        title = titleEl.textContent.trim();
+      // 1. Title Extraction Priority:
+      // First priority: Extract title directly from React Fiber props or stamped attributes
+      if (fiberDetails?.title && fiberDetails.title.length > 0) {
+        title = fiberDetails.title;
       }
 
-      const classEl = card.querySelector(
-        '[data-tid*="class"], [data-tid*="course"], [data-tid*="subTitle"], [class*="subtitle" i], [class*="class" i]'
-      );
-      if (classEl) {
-        courseName = cleanCourseOrTeamName(classEl.textContent.trim());
+      // Second priority: Check DOM attributes designed for full accessibility text
+      if (!title || title.length <= 2) {
+        title =
+          card.querySelector('[data-test*="title"]')?.getAttribute('title') ||
+          card.querySelector('[data-test*="title"]')?.getAttribute('aria-label') ||
+          card.querySelector('[data-tid*="title"]')?.getAttribute('title') ||
+          card.querySelector('[data-tid*="title"]')?.getAttribute('aria-label') ||
+          card.querySelector('[class*="title" i]:not([class*="avatar" i])')?.getAttribute('title') ||
+          card.querySelector('[class*="title" i]:not([class*="avatar" i])')?.getAttribute('aria-label') ||
+          card.getAttribute('title') ||
+          card.getAttribute('aria-label') ||
+          '';
+
+        if (title.startsWith('Assignment:')) {
+          const match = title.match(/Assignment:\s*([^,\n\r]+)/i);
+          if (match) title = match[1].trim();
+        }
+      }
+
+      // Third priority: Direct DOM queries for precise elements (avoiding avatar initial letters)
+      if (!title || title.length <= 2) {
+        const titleEl = card.querySelector(
+          '[data-test*="title"], [data-tid*="title"], [class*="title" i]:not([class*="avatar" i]):not([class*="badge" i]), [role="heading"], h2, h3, h4'
+        );
+        if (titleEl && titleEl.textContent.trim().length > 2) {
+          title = titleEl.textContent.trim();
+        }
+      }
+
+      // 2. Course Name Extraction Priority:
+      // First priority: Clean class title from Fiber props or stamped attributes
+      if (fiberDetails?.className) {
+        courseName = cleanCourseOrTeamName(fiberDetails.className);
+      }
+
+      // Second priority: DOM class element
+      if (!courseName) {
+        const classEl = card.querySelector(
+          '[data-tid*="class"], [data-tid*="course"], [data-tid*="subTitle"], [class*="subtitle" i], [class*="class" i]'
+        );
+        if (classEl) {
+          courseName = cleanCourseOrTeamName(classEl.textContent.trim());
+        }
       }
 
       // Check lines for tokens
@@ -1999,10 +2109,11 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
         }
       }
 
-      // Fallback title from candidate lines
-      if (!title) {
+      // Fallback title from candidate lines (ignoring single-letter lines)
+      if (!title || title.length <= 2) {
         const candidateLines = lines.filter(
           (l) =>
+            l.length > 2 &&
             !isCourseLine(l) &&
             !extractTimeToken(l) &&
             !parseDateHeaderToken(l) &&
@@ -2012,7 +2123,7 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
         title = candidateLines[0] || '';
       }
 
-      if (!title || /^(?:upcoming|further out|past due|completed|assigned)$/i.test(title)) {
+      if (!title || title.length <= 2 || /^(?:upcoming|further out|past due|completed|assigned)$/i.test(title)) {
         continue;
       }
 
@@ -2025,19 +2136,21 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
       const rawDueString = buildExplicitDueString(activeDateHeader, timeString, title);
 
       // Deep link resolution targeting specific assignment view
-      const fiberDetails = getAssignmentFiberDetails(card);
       let deepLink = fiberDetails?.deepLink || extractEduCardDeepLink(card);
       if (!deepLink || deepLink.endsWith('/classes/all/list') || deepLink.endsWith('/classes/all/list/')) {
         deepLink = 'https://teams.microsoft.com/_#/assignments/';
       }
 
-      // Scraper ID Capture: Extract UUID from card element
+      // Scraper ID Capture: Extract UUID from fiber or card element
       const assignmentId =
-        card.id ||
+        fiberDetails?.assignmentId ||
+        card.getAttribute?.('data-hark-assignment-id') ||
         card.getAttribute?.('data-assignment-id') ||
         card.getAttribute?.('data-item-id') ||
-        fiberDetails?.assignmentId ||
+        card.id ||
         null;
+
+      const classId = fiberDetails?.classId || card.getAttribute?.('data-hark-class-id') || null;
 
       const signature = `${title.toLowerCase()}::${courseCode.toLowerCase()}::${rawDueString.toLowerCase()}`;
       if (!seenSignatures.has(signature)) {
@@ -2050,6 +2163,7 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
           rawDueString,
           deepLink,
           assignmentId,
+          classId,
           directPortalUrl: fiberDetails?.directPortalUrl || deepLink,
           teamsAppDeepLink: fiberDetails?.teamsAppDeepLink || null,
         });
@@ -2136,21 +2250,31 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
             const courseCode = courseBadge.replace(/^\[+|\]+$/g, '');
             const rawDueString = buildExplicitDueString(activeDateHeader, timeToken, titleLine);
 
-            // Attempt to find element matching titleLine to extract specific deepLink
+            // Attempt to find element matching titleLine to extract specific deepLink and Fiber details
             let deepLink = null;
             let fiberDetails = null;
+            let finalTitle = titleLine;
+            let finalCourse = courseText;
+            let cardTarget = null;
+
             try {
               const allCandidateEls = listRoot.querySelectorAll(
-                'div[data-test="assignment-card"], [data-test="assignment-card"], a, [role="row"], [role="listitem"], [data-tid*="assignment"], h2, h3, h4, strong, div[data-is-focusable="true"]'
+                'div[data-test="assignment-card"], [data-test="assignment-card"], a, [role="row"], [role="listitem"], [data-tid*="assignment"], h2, h3, h4, div[data-is-focusable="true"]'
               );
               for (const candidateEl of allCandidateEls) {
                 if (candidateEl.textContent && candidateEl.textContent.includes(titleLine)) {
-                  const cardTarget =
+                  cardTarget =
                     candidateEl.closest(
                       'div[data-test="assignment-card"], [data-test="assignment-card"], a, [role="row"], [role="listitem"], [data-tid*="assignment"]'
                     ) || candidateEl;
                   fiberDetails = getAssignmentFiberDetails(cardTarget);
                   deepLink = fiberDetails?.deepLink || extractEduCardDeepLink(cardTarget);
+                  if (fiberDetails?.title && fiberDetails.title.length > 2) {
+                    finalTitle = fiberDetails.title;
+                  }
+                  if (fiberDetails?.className) {
+                    finalCourse = cleanCourseOrTeamName(fiberDetails.className);
+                  }
                   if (deepLink && !deepLink.endsWith('/classes/all/list') && !deepLink.endsWith('/classes/all/list/')) break;
                 }
               }
@@ -2169,17 +2293,20 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
               cardTarget?.getAttribute?.('data-item-id') ||
               null;
 
-            const signature = `${titleLine.toLowerCase()}::${courseCode.toLowerCase()}::${rawDueString.toLowerCase()}`;
+            const classId = fiberDetails?.classId || null;
+
+            const signature = `${finalTitle.toLowerCase()}::${courseCode.toLowerCase()}::${rawDueString.toLowerCase()}`;
             if (!seenSignatures.has(signature)) {
               seenSignatures.add(signature);
               extractedTasks.push({
-                title: titleLine,
-                courseName: courseText,
+                title: finalTitle,
+                courseName: finalCourse,
                 courseCode,
                 courseBadge,
                 rawDueString,
                 deepLink,
                 assignmentId,
+                classId,
                 directPortalUrl: fiberDetails?.directPortalUrl || deepLink,
                 teamsAppDeepLink: fiberDetails?.teamsAppDeepLink || null,
               });
@@ -2249,29 +2376,57 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
 
       const rawDueString = dueMatch[1].trim();
 
-      // Title extraction
-      let title = '';
-      const titleEl = el.querySelector(
-        '[data-tid*="title"], h3, h4, h2, strong, [class*="title" i], [class*="header" i], [role="heading"]'
-      );
-      if (titleEl) {
-        title = titleEl.textContent.trim();
-      } else {
-        const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
-        title = lines[0] || 'Assignment';
+      const fiberDetails = getAssignmentFiberDetails(el);
+
+      // Title extraction Priority:
+      // Priority 1: React Fiber props
+      let title = fiberDetails?.title || el.getAttribute?.('data-hark-title') || '';
+
+      // Priority 2: DOM attributes designed for full accessibility text
+      if (!title || title.length <= 2) {
+        title =
+          el.querySelector('[data-test*="title"]')?.getAttribute('title') ||
+          el.querySelector('[data-test*="title"]')?.getAttribute('aria-label') ||
+          el.querySelector('[data-tid*="title"]')?.getAttribute('title') ||
+          el.querySelector('[data-tid*="title"]')?.getAttribute('aria-label') ||
+          el.querySelector('[class*="title" i]:not([class*="avatar" i])')?.getAttribute('title') ||
+          el.querySelector('[class*="title" i]:not([class*="avatar" i])')?.getAttribute('aria-label') ||
+          el.getAttribute('title') ||
+          el.getAttribute('aria-label') ||
+          '';
+
+        if (title.startsWith('Assignment:')) {
+          const match = title.match(/Assignment:\s*([^,\n\r]+)/i);
+          if (match) title = match[1].trim();
+        }
       }
 
-      if (/^(?:upcoming|past due|completed|assigned|past|due)$/i.test(title)) {
+      // Priority 3: Direct DOM queries for precise elements (avoiding avatar initial letters)
+      if (!title || title.length <= 2) {
+        const titleEl = el.querySelector(
+          '[data-tid*="title"], [data-test*="title"], h3, h4, h2, [class*="title" i]:not([class*="avatar" i]):not([class*="badge" i]), [role="heading"]'
+        );
+        if (titleEl && titleEl.textContent.trim().length > 2) {
+          title = titleEl.textContent.trim();
+        } else {
+          const lines = text.split('\n').map((l) => l.trim()).filter((l) => l.length > 2);
+          title = lines[0] || '';
+        }
+      }
+
+      if (!title || title.length <= 2 || /^(?:upcoming|past due|completed|assigned|past|due)$/i.test(title)) {
         continue;
       }
 
       // Course / Class Name extraction
-      let courseName = '';
-      const classEl = el.querySelector(
-        '[data-tid*="class"], [data-tid*="course"], [class*="class" i], [class*="subtitle" i], [class*="sub-title" i], [aria-label*="class" i], [data-tid*="subtitle"]'
-      );
-      if (classEl) {
-        courseName = cleanCourseOrTeamName(classEl.textContent);
+      let courseName = fiberDetails?.className || el.getAttribute?.('data-hark-class-name') || '';
+      if (!courseName) {
+        const classEl = el.querySelector(
+          '[data-tid*="class"], [data-tid*="course"], [class*="class" i], [class*="subtitle" i], [class*="sub-title" i], [aria-label*="class" i], [data-tid*="subtitle"]'
+        );
+        if (classEl) {
+          courseName = cleanCourseOrTeamName(classEl.textContent);
+        }
       }
       if (!courseName) {
         const codeMatch = text.match(/\b([A-Z]{2,6}\s*(?:-|\s)?\s*\d{2,4}[A-Z0-9]*)\b/i);
@@ -2283,18 +2438,30 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
       }
 
       // Deep Link extraction
-      let deepLink = '';
-      const linkEl = el.querySelector('a[href]') || el.closest('a[href]');
-      if (linkEl && linkEl.href) {
-        deepLink = linkEl.href;
-      } else {
-        const dataUrl = el.getAttribute('data-href') || el.getAttribute('data-url');
-        if (dataUrl) {
-          deepLink = dataUrl.startsWith('http') ? dataUrl : `${window.location.origin}${dataUrl}`;
+      let deepLink = fiberDetails?.deepLink || extractEduCardDeepLink(el);
+      if (!deepLink) {
+        const linkEl = el.querySelector('a[href]') || el.closest('a[href]');
+        if (linkEl && linkEl.href) {
+          deepLink = linkEl.href;
         } else {
-          deepLink = window.location.href;
+          const dataUrl = el.getAttribute('data-href') || el.getAttribute('data-url');
+          if (dataUrl) {
+            deepLink = dataUrl.startsWith('http') ? dataUrl : `${window.location.origin}${dataUrl}`;
+          } else {
+            deepLink = window.location.href;
+          }
         }
       }
+
+      const assignmentId =
+        fiberDetails?.assignmentId ||
+        el.getAttribute?.('data-hark-assignment-id') ||
+        el.getAttribute?.('data-assignment-id') ||
+        el.getAttribute?.('data-item-id') ||
+        el.id ||
+        null;
+
+      const classId = fiberDetails?.classId || el.getAttribute?.('data-hark-class-id') || null;
 
       const courseBadge = extractCourseBadge(courseName);
       const courseCode = courseBadge.replace(/^\[+|\]+$/g, '');
@@ -2308,6 +2475,10 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
           courseBadge,
           rawDueString,
           deepLink,
+          assignmentId,
+          classId,
+          directPortalUrl: fiberDetails?.directPortalUrl || deepLink,
+          teamsAppDeepLink: fiberDetails?.teamsAppDeepLink || null,
         });
       }
     }

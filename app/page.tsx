@@ -16,6 +16,7 @@ import {
   Clock,
   KeyRound,
   ChevronDown,
+  ChevronUp,
   ChevronsUpDown,
   ArrowUpDown,
   BookOpen,
@@ -26,13 +27,20 @@ import {
   ExternalLink,
   Plus,
   Layers,
-  GraduationCap,
+  LayoutList,
+  FolderCheck,
 } from 'lucide-react';
 import { TaskItem } from '@/components/TaskCard';
 import { TaskTableRow } from '@/components/TaskTableRow';
 import { ExtensionBanner, ExtensionStatusBadge } from '@/components/ExtensionBanner';
 import { useHarkExtension } from '@/hooks/useHarkExtension';
-import { parseDueDate, exportToICS } from '@/lib/dateUtils';
+import { exportToICS } from '@/lib/dateUtils';
+import {
+  categorizeTasks,
+  LifecycleCategory,
+  isTaskCompleted,
+  isTaskPastDue,
+} from '@/lib/taskUtils';
 
 interface Course {
   id: string;
@@ -67,19 +75,31 @@ export default function StudentDashboardPage() {
   const [activeMainTab, setActiveMainTab] = useState<'assignments' | 'courses'>('assignments');
   const [sidebarOpen, setSidebarOpen] = useState<boolean>(false);
 
-  // Assignments segmented control: 'all' | 'active' | 'completed' (default: 'all' for instant visibility)
-  const [segmentFilter, setSegmentFilter] = useState<'all' | 'active' | 'completed'>('all');
+  // Lifecycle Tab State: 'upcoming' | 'past_due' | 'completed' (default: 'upcoming')
+  const [lifecycleTab, setLifecycleTab] = useState<LifecycleCategory>('upcoming');
+  const [isGroupedView, setIsGroupedView] = useState<boolean>(false);
+
+  // Collapsible Section States for Grouped View
+  const [expandedSections, setExpandedSections] = useState<{
+    upcoming: boolean;
+    past_due: boolean;
+    completed: boolean;
+  }>({
+    upcoming: true,
+    past_due: true,
+    completed: true,
+  });
 
   // Filter & Search Controls
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [selectedCourse, setSelectedCourse] = useState<string>('all');
-  const [sortOption, setSortOption] = useState<'deadline_asc' | 'deadline_desc' | 'title_asc' | 'priority'>('deadline_asc');
+  const [sortOption, setSortOption] = useState<'deadline_asc' | 'deadline_desc' | 'title_asc'>('deadline_asc');
   const [showFilterDropdown, setShowFilterDropdown] = useState<boolean>(false);
   const [showSortDropdown, setShowSortDropdown] = useState<boolean>(false);
 
-  // Pagination State
+  // Pagination State (increased default page size to 25 items)
   const [currentPage, setCurrentPage] = useState<number>(1);
-  const pageSize = 10;
+  const pageSize = 25;
 
   // Refs
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -212,14 +232,12 @@ export default function StudentDashboardPage() {
 
   // Export pending tasks to .ics
   const handleExportICS = () => {
-    const pendingTasks = tasks.filter(
-      (t) => !(t.is_completed ?? t.completed ?? t.status === 'completed')
-    );
-    if (pendingTasks.length === 0) {
+    const activeTasks = tasks.filter((t) => !isTaskCompleted(t));
+    if (activeTasks.length === 0) {
       alert('No active tasks to export!');
       return;
     }
-    exportToICS(pendingTasks);
+    exportToICS(activeTasks);
   };
 
   // Trigger MS Teams auto sync or manual refresh
@@ -231,92 +249,104 @@ export default function StudentDashboardPage() {
     fetchTasks(userId, true);
   };
 
-  // Metric stats
-  const stats = useMemo(() => {
-    const totalPending = tasks.filter(
-      (t) => !(t.is_completed ?? t.completed ?? t.status === 'completed')
-    ).length;
-    const dueTodayCount = tasks.filter(
-      (t) =>
-        !(t.is_completed ?? t.completed ?? t.status === 'completed') &&
-        parseDueDate(t.due_date).urgency === 'today'
-    ).length;
-    const dueTomorrowCount = tasks.filter(
-      (t) =>
-        !(t.is_completed ?? t.completed ?? t.status === 'completed') &&
-        parseDueDate(t.due_date).urgency === 'tomorrow'
-    ).length;
-    const completedCount = tasks.filter(
-      (t) => Boolean(t.is_completed ?? t.completed ?? t.status === 'completed')
-    ).length;
-
-    return { totalPending, dueTodayCount, dueTomorrowCount, completedCount, total: tasks.length };
+  // Categorize raw tasks into 3 distinct lifecycle buckets
+  const { upcoming, pastDue, completed } = useMemo(() => {
+    return categorizeTasks(tasks);
   }, [tasks]);
 
-  // Filtered & Sorted Tasks based on segmented control, search, and course
-  const filteredTasks = useMemo(() => {
-    const search = searchQuery.trim().toLowerCase();
+  // Metric counts
+  const upcomingCount = upcoming.length;
+  const pastDueCount = pastDue.length;
+  const completedCount = completed.length;
 
-    const result = tasks.filter((task) => {
-      const isComp = Boolean(task.is_completed ?? task.completed ?? task.status === 'completed');
-
-      // 1. Segmented Control filter ('all' | 'active' | 'completed')
-      if (segmentFilter === 'active' && isComp) return false;
-      if (segmentFilter === 'completed' && !isComp) return false;
-
-      // 2. Search filter
-      const matchesSearch =
-        !search ||
-        task.title.toLowerCase().includes(search) ||
-        (task.course_code && task.course_code.toLowerCase().includes(search)) ||
-        (task.course_name && task.course_name.toLowerCase().includes(search)) ||
-        (task.description && task.description.toLowerCase().includes(search));
-
-      // 3. Course filter
-      const matchesCourse =
-        selectedCourse === 'all' ||
-        task.course_id === selectedCourse ||
-        (task.course_code && task.course_code.toLowerCase() === selectedCourse.toLowerCase());
-
-      return matchesSearch && matchesCourse;
-    });
-
-    // Sorting
-    result.sort((a, b) => {
-      if (sortOption === 'title_asc') {
-        return a.title.localeCompare(b.title);
+  // Active student enrolled courses: strictly filter out ghost/phantom courses and courses without active/past-due deliverables
+  const activeEnrolledCourses = useMemo(() => {
+    return courses.filter((course) => {
+      if (course.code === 'MAIN' || /main channels|teams and channels/i.test(course.name)) {
+        return false;
       }
-      if (sortOption === 'deadline_desc') {
+      const courseTaskCount = tasks.filter(
+        (t) =>
+          t.course_id === course.id ||
+          (t.course_code && t.course_code.toLowerCase() === course.code.toLowerCase())
+      ).length;
+      return (course.task_count ?? 0) > 0 || courseTaskCount > 0;
+    });
+  }, [courses, tasks]);
+
+  // Filter & Sort helper for a list of tasks
+  const filterAndSortList = useCallback(
+    (taskList: TaskItem[]) => {
+      const search = searchQuery.trim().toLowerCase();
+
+      const filtered = taskList.filter((task) => {
+        // Search filter
+        const matchesSearch =
+          !search ||
+          task.title.toLowerCase().includes(search) ||
+          (task.course_code && task.course_code.toLowerCase().includes(search)) ||
+          (task.course_name && task.course_name.toLowerCase().includes(search)) ||
+          (task.description && task.description.toLowerCase().includes(search));
+
+        // Course filter
+        const matchesCourse =
+          selectedCourse === 'all' ||
+          task.course_id === selectedCourse ||
+          (task.course_code && task.course_code.toLowerCase() === selectedCourse.toLowerCase());
+
+        return matchesSearch && matchesCourse;
+      });
+
+      // Sort
+      filtered.sort((a, b) => {
+        if (sortOption === 'title_asc') {
+          return a.title.localeCompare(b.title);
+        }
+        if (sortOption === 'deadline_desc') {
+          const timeA = new Date(a.due_date).getTime() || 0;
+          const timeB = new Date(b.due_date).getTime() || 0;
+          return timeB - timeA;
+        }
+        // deadline_asc (nearest deadline first)
         const timeA = new Date(a.due_date).getTime() || 0;
         const timeB = new Date(b.due_date).getTime() || 0;
-        return timeB - timeA;
-      }
-      if (sortOption === 'priority') {
-        const order = { overdue: 0, today: 1, tomorrow: 2, within_7_days: 3, later: 4 };
-        const urgA = order[parseDueDate(a.due_date).urgency] ?? 5;
-        const urgB = order[parseDueDate(b.due_date).urgency] ?? 5;
-        return urgA - urgB;
-      }
-      // default: deadline_asc
-      const timeA = new Date(a.due_date).getTime() || 0;
-      const timeB = new Date(b.due_date).getTime() || 0;
-      return timeA - timeB;
-    });
+        return timeA - timeB;
+      });
 
-    return result;
-  }, [tasks, segmentFilter, searchQuery, selectedCourse, sortOption]);
+      return filtered;
+    },
+    [searchQuery, selectedCourse, sortOption]
+  );
 
-  // Reset page when filters change
+  // Filtered lists for each category
+  const filteredUpcoming = useMemo(() => filterAndSortList(upcoming), [upcoming, filterAndSortList]);
+  const filteredPastDue = useMemo(() => filterAndSortList(pastDue), [pastDue, filterAndSortList]);
+  const filteredCompleted = useMemo(() => filterAndSortList(completed), [completed, filterAndSortList]);
+
+  // Active Category List for Tabbed View
+  const activeCategoryList = useMemo(() => {
+    switch (lifecycleTab) {
+      case 'past_due':
+        return filteredPastDue;
+      case 'completed':
+        return filteredCompleted;
+      case 'upcoming':
+      default:
+        return filteredUpcoming;
+    }
+  }, [lifecycleTab, filteredUpcoming, filteredPastDue, filteredCompleted]);
+
+  // Reset page when tab or filters change
   useEffect(() => {
     setCurrentPage(1);
-  }, [segmentFilter, searchQuery, selectedCourse, sortOption]);
+  }, [lifecycleTab, isGroupedView, searchQuery, selectedCourse, sortOption]);
 
-  // Pagination calculation
-  const totalPages = Math.max(1, Math.ceil(filteredTasks.length / pageSize));
+  // Pagination for Tabbed View
+  const totalPages = Math.max(1, Math.ceil(activeCategoryList.length / pageSize));
   const paginatedTasks = useMemo(() => {
     const start = (currentPage - 1) * pageSize;
-    return filteredTasks.slice(start, start + pageSize);
-  }, [filteredTasks, currentPage, pageSize]);
+    return activeCategoryList.slice(start, start + pageSize);
+  }, [activeCategoryList, currentPage, pageSize]);
 
   return (
     <div className="min-h-screen bg-[#F8F9FC] text-slate-800 flex font-sans antialiased selection:bg-[#CCCCFF] selection:text-[#292966]">
@@ -392,9 +422,16 @@ export default function StudentDashboardPage() {
                 <CheckSquare className={`w-4 h-4 ${activeMainTab === 'assignments' ? 'text-[#292966]' : 'text-slate-400'}`} />
                 <span>Assignments</span>
               </div>
-              <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-[#CCCCFF]/40 text-[#292966]">
-                {stats.totalPending}
-              </span>
+              <div className="flex items-center gap-1">
+                {pastDueCount > 0 && (
+                  <span className="px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-rose-100 text-rose-700" title={`${pastDueCount} past due`}>
+                    {pastDueCount}
+                  </span>
+                )}
+                <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-[#CCCCFF]/40 text-[#292966]">
+                  {upcomingCount}
+                </span>
+              </div>
             </button>
 
             {/* 2. Courses / Teams */}
@@ -457,7 +494,7 @@ export default function StudentDashboardPage() {
                 <button
                   type="button"
                   onClick={() => setShowSettingsModal(true)}
-                  className="mt-1 w-full py-1.5 px-2 rounded-md bg-[#292966] text-white text-xs font-medium hover:bg-[#1E1E4F] transition-colors text-center"
+                  className="mt-1 w-full py-1.5 px-2 rounded-md bg-[#292966] text-white text-xs font-medium hover:bg-[#1E1E4F] transition-colors text-center cursor-pointer"
                 >
                   Pair Extension
                 </button>
@@ -483,7 +520,7 @@ export default function StudentDashboardPage() {
                 type="button"
                 onClick={() => setShowSettingsModal(true)}
                 title="Account Settings"
-                className="p-1 text-slate-400 hover:text-[#292966] transition-colors"
+                className="p-1 text-slate-400 hover:text-[#292966] transition-colors cursor-pointer"
               >
                 <Settings className="w-3.5 h-3.5" />
               </button>
@@ -529,7 +566,7 @@ export default function StudentDashboardPage() {
               type="button"
               onClick={handleSyncWithTeams}
               disabled={isRefreshing}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-xs font-medium transition-colors shadow-2xs active:scale-95"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-xs font-medium transition-colors shadow-2xs active:scale-95 cursor-pointer"
               title="Sync assignments from MS Teams"
             >
               <RefreshCw className={`w-3.5 h-3.5 text-[#5C5C99] ${isRefreshing ? 'animate-spin' : ''}`} />
@@ -541,7 +578,7 @@ export default function StudentDashboardPage() {
               type="button"
               onClick={() => setShowSettingsModal(true)}
               title="Settings &amp; Pairing"
-              className="p-2 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-500 hover:text-[#292966] transition-colors"
+              className="p-2 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-500 hover:text-[#292966] transition-colors cursor-pointer"
             >
               <Settings className="w-4 h-4" />
             </button>
@@ -551,7 +588,7 @@ export default function StudentDashboardPage() {
               <button
                 type="button"
                 onClick={() => setShowUserModal(!showUserModal)}
-                className="flex items-center gap-1.5 p-1 pl-1.5 pr-2 rounded-full border border-slate-200 hover:border-[#CCCCFF] transition-all bg-white"
+                className="flex items-center gap-1.5 p-1 pl-1.5 pr-2 rounded-full border border-slate-200 hover:border-[#CCCCFF] transition-all bg-white cursor-pointer"
               >
                 <div className="w-6 h-6 rounded-full bg-[#292966] text-white font-bold text-[10px] flex items-center justify-center">
                   AJ
@@ -578,7 +615,7 @@ export default function StudentDashboardPage() {
                       <button
                         type="button"
                         onClick={handleCopyKey}
-                        className="p-1 hover:bg-[#CCCCFF]/30 rounded text-slate-400 hover:text-[#292966]"
+                        className="p-1 hover:bg-[#CCCCFF]/30 rounded text-slate-400 hover:text-[#292966] cursor-pointer"
                         title="Copy UUID"
                       >
                         {copiedKey ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
@@ -592,7 +629,7 @@ export default function StudentDashboardPage() {
                       setShowUserModal(false);
                       setShowSettingsModal(true);
                     }}
-                    className="w-full py-1.5 rounded-lg bg-slate-50 hover:bg-[#CCCCFF]/20 text-slate-700 hover:text-[#292966] font-medium text-center border border-slate-200 transition-colors"
+                    className="w-full py-1.5 rounded-lg bg-slate-50 hover:bg-[#CCCCFF]/20 text-slate-700 hover:text-[#292966] font-medium text-center border border-slate-200 transition-colors cursor-pointer"
                   >
                     Manage Account &amp; Sync
                   </button>
@@ -610,65 +647,114 @@ export default function StudentDashboardPage() {
           {/* VIEW 1: ASSIGNMENTS VIEW */}
           {activeMainTab === 'assignments' && (
             <div className="flex flex-col gap-6">
-              {/* Metric / Stat Cards */}
-              <section className="grid grid-cols-2 sm:grid-cols-4 gap-3 sm:gap-4">
-                {/* Total Upcoming */}
-                <div className="p-4 rounded-xl bg-white border border-slate-200/80 shadow-[0_1px_3px_rgba(0,0,0,0.03)] flex items-center justify-between">
+              {/* 3. Metric Cards Realignment: Exact 3 categories (Upcoming, Past Due, Completed) */}
+              <section className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                {/* Card 1: Upcoming Tasks */}
+                <div
+                  onClick={() => {
+                    setLifecycleTab('upcoming');
+                    setIsGroupedView(false);
+                  }}
+                  className={`p-4 rounded-xl bg-white border shadow-[0_1px_3px_rgba(0,0,0,0.03)] flex items-center justify-between cursor-pointer transition-all hover:border-[#CCCCFF] active:scale-[0.99] ${
+                    lifecycleTab === 'upcoming' && !isGroupedView
+                      ? 'border-[#292966] ring-1 ring-[#292966]/20'
+                      : 'border-slate-200/80'
+                  }`}
+                >
                   <div>
-                    <p className="text-xs font-medium text-slate-500">Total Upcoming</p>
-                    <p className="text-2xl font-bold text-[#292966] mt-0.5">{stats.totalPending}</p>
+                    <p className="text-xs font-semibold text-slate-500">Upcoming Tasks</p>
+                    <p className="text-2xl font-bold text-[#292966] mt-0.5">{upcomingCount}</p>
+                    <p className="text-[11px] text-slate-400 mt-1">Active upcoming deadlines</p>
                   </div>
-                  <div className="w-10 h-10 rounded-lg bg-[#CCCCFF]/20 text-[#292966] flex items-center justify-center">
-                    <Inbox className="w-5 h-5" />
-                  </div>
-                </div>
-
-                {/* Due Today */}
-                <div className="p-4 rounded-xl bg-white border border-slate-200/80 shadow-[0_1px_3px_rgba(0,0,0,0.03)] flex items-center justify-between">
-                  <div>
-                    <p className="text-xs font-medium text-slate-500">Due Today</p>
-                    <p className="text-2xl font-bold text-rose-600 mt-0.5">{stats.dueTodayCount}</p>
-                  </div>
-                  <div className="w-10 h-10 rounded-lg bg-rose-50 text-rose-600 flex items-center justify-center">
-                    <AlertTriangle className="w-5 h-5" />
-                  </div>
-                </div>
-
-                {/* Due Tomorrow */}
-                <div className="p-4 rounded-xl bg-white border border-slate-200/80 shadow-[0_1px_3px_rgba(0,0,0,0.03)] flex items-center justify-between">
-                  <div>
-                    <p className="text-xs font-medium text-slate-500">Due Tomorrow</p>
-                    <p className="text-2xl font-bold text-amber-600 mt-0.5">{stats.dueTomorrowCount}</p>
-                  </div>
-                  <div className="w-10 h-10 rounded-lg bg-amber-50 text-amber-600 flex items-center justify-center">
+                  <div className="w-11 h-11 rounded-xl bg-[#CCCCFF]/25 text-[#292966] flex items-center justify-center">
                     <Clock className="w-5 h-5" />
                   </div>
                 </div>
 
-                {/* Completed */}
-                <div className="p-4 rounded-xl bg-white border border-slate-200/80 shadow-[0_1px_3px_rgba(0,0,0,0.03)] flex items-center justify-between">
+                {/* Card 2: Past Due */}
+                <div
+                  onClick={() => {
+                    setLifecycleTab('past_due');
+                    setIsGroupedView(false);
+                  }}
+                  className={`p-4 rounded-xl border shadow-[0_1px_3px_rgba(0,0,0,0.03)] flex items-center justify-between cursor-pointer transition-all active:scale-[0.99] ${
+                    pastDueCount > 0
+                      ? 'bg-rose-50/50 border-rose-200/80 hover:border-rose-300'
+                      : 'bg-white border-slate-200/80 hover:border-[#CCCCFF]'
+                  } ${
+                    lifecycleTab === 'past_due' && !isGroupedView
+                      ? 'ring-2 ring-rose-400/40 border-rose-400'
+                      : ''
+                  }`}
+                >
                   <div>
-                    <p className="text-xs font-medium text-slate-500">Completed</p>
-                    <p className="text-2xl font-bold text-emerald-600 mt-0.5">{stats.completedCount}</p>
+                    <p className={`text-xs font-semibold ${pastDueCount > 0 ? 'text-rose-700' : 'text-slate-500'}`}>
+                      Past Due
+                    </p>
+                    <p className={`text-2xl font-bold mt-0.5 ${pastDueCount > 0 ? 'text-rose-600' : 'text-slate-700'}`}>
+                      {pastDueCount}
+                    </p>
+                    <p className={`text-[11px] mt-1 ${pastDueCount > 0 ? 'text-rose-600/80 font-medium' : 'text-slate-400'}`}>
+                      {pastDueCount > 0 ? 'Requires attention' : 'No overdue assignments'}
+                    </p>
                   </div>
-                  <div className="w-10 h-10 rounded-lg bg-emerald-50 text-emerald-600 flex items-center justify-center">
+                  <div className={`w-11 h-11 rounded-xl flex items-center justify-center ${
+                    pastDueCount > 0 ? 'bg-rose-100 text-rose-600' : 'bg-slate-100 text-slate-400'
+                  }`}>
+                    <AlertTriangle className="w-5 h-5" />
+                  </div>
+                </div>
+
+                {/* Card 3: Completed */}
+                <div
+                  onClick={() => {
+                    setLifecycleTab('completed');
+                    setIsGroupedView(false);
+                  }}
+                  className={`p-4 rounded-xl bg-white border shadow-[0_1px_3px_rgba(0,0,0,0.03)] flex items-center justify-between cursor-pointer transition-all hover:border-[#CCCCFF] active:scale-[0.99] ${
+                    lifecycleTab === 'completed' && !isGroupedView
+                      ? 'border-emerald-600 ring-1 ring-emerald-600/20'
+                      : 'border-slate-200/80'
+                  }`}
+                >
+                  <div>
+                    <p className="text-xs font-semibold text-slate-500">Completed</p>
+                    <p className="text-2xl font-bold text-emerald-600 mt-0.5">{completedCount}</p>
+                    <p className="text-[11px] text-slate-400 mt-1">Checked off deliverables</p>
+                  </div>
+                  <div className="w-11 h-11 rounded-xl bg-emerald-50 text-emerald-600 border border-emerald-200/60 flex items-center justify-center">
                     <CheckCircle2 className="w-5 h-5" />
                   </div>
                 </div>
               </section>
 
-              {/* Assignments Header & Segmented Controls */}
+              {/* Assignments Header & View Controls */}
               <div className="flex flex-col gap-4">
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                   <div>
                     <h1 className="text-2xl font-bold text-[#292966]">Assignments</h1>
                     <p className="text-xs text-slate-500 mt-0.5">
-                      Display all the tasks and essential details.
+                      Categorized lifecycle tracking: Upcoming, Past Due, and Completed deliverables.
                     </p>
                   </div>
 
                   {/* Actions on right */}
                   <div className="flex items-center gap-2.5">
+                    {/* Toggle: Segmented Tab View vs Grouped View */}
+                    <button
+                      type="button"
+                      onClick={() => setIsGroupedView(!isGroupedView)}
+                      className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-medium transition-colors cursor-pointer shadow-2xs ${
+                        isGroupedView
+                          ? 'bg-[#292966] text-white border-[#292966]'
+                          : 'bg-white hover:bg-slate-50 text-slate-700 border-slate-200'
+                      }`}
+                      title={isGroupedView ? 'Switch to Segmented Tabs' : 'View all sections grouped vertically'}
+                    >
+                      <Layers className="w-3.5 h-3.5" />
+                      <span>{isGroupedView ? 'Grouped View (Active)' : 'Grouped View'}</span>
+                    </button>
+
                     {/* Primary Sync Button */}
                     <button
                       type="button"
@@ -682,43 +768,64 @@ export default function StudentDashboardPage() {
                   </div>
                 </div>
 
-                {/* Clean inline segmented control: [ All (20) | Active (X) | Completed (20) ] */}
+                {/* 2. Segmented Tab Bar: [ Upcoming (count) | Past Due (count) | Completed (count) ] */}
                 <div className="flex items-center justify-between border-b border-slate-200/80 pb-3 flex-wrap gap-3">
-                  <div className="inline-flex p-1 rounded-lg bg-slate-100/90 border border-slate-200/60 text-xs font-medium">
-                    <button
-                      type="button"
-                      onClick={() => setSegmentFilter('all')}
-                      className={`px-3 py-1.5 rounded-md transition-all cursor-pointer ${
-                        segmentFilter === 'all'
-                          ? 'bg-white text-[#292966] font-bold shadow-2xs'
-                          : 'text-slate-600 hover:text-[#292966]'
-                      }`}
-                    >
-                      All ({tasks.length})
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setSegmentFilter('active')}
-                      className={`px-3 py-1.5 rounded-md transition-all cursor-pointer ${
-                        segmentFilter === 'active'
-                          ? 'bg-white text-[#292966] font-bold shadow-2xs'
-                          : 'text-slate-600 hover:text-[#292966]'
-                      }`}
-                    >
-                      Active ({stats.totalPending})
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setSegmentFilter('completed')}
-                      className={`px-3 py-1.5 rounded-md transition-all cursor-pointer ${
-                        segmentFilter === 'completed'
-                          ? 'bg-white text-[#292966] font-bold shadow-2xs'
-                          : 'text-slate-600 hover:text-[#292966]'
-                      }`}
-                    >
-                      Completed ({stats.completedCount})
-                    </button>
-                  </div>
+                  {!isGroupedView ? (
+                    <div className="inline-flex p-1 rounded-xl bg-slate-100/90 border border-slate-200/60 text-xs font-medium shadow-inner">
+                      {/* Upcoming Tab */}
+                      <button
+                        type="button"
+                        onClick={() => setLifecycleTab('upcoming')}
+                        className={`inline-flex items-center gap-2 px-3.5 py-1.5 rounded-lg transition-all cursor-pointer ${
+                          lifecycleTab === 'upcoming'
+                            ? 'bg-white text-[#292966] font-bold shadow-xs'
+                            : 'text-slate-600 hover:text-[#292966]'
+                        }`}
+                      >
+                        <span>Upcoming</span>
+                        <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-[#CCCCFF]/25 text-[#292966]">
+                          {upcomingCount}
+                        </span>
+                      </button>
+
+                      {/* Past Due Tab */}
+                      <button
+                        type="button"
+                        onClick={() => setLifecycleTab('past_due')}
+                        className={`inline-flex items-center gap-2 px-3.5 py-1.5 rounded-lg transition-all cursor-pointer ${
+                          lifecycleTab === 'past_due'
+                            ? 'bg-white text-rose-700 font-bold shadow-xs'
+                            : 'text-slate-600 hover:text-rose-700'
+                        }`}
+                      >
+                        <span>Past Due</span>
+                        <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-rose-50 text-rose-600 border border-rose-200/60">
+                          {pastDueCount}
+                        </span>
+                      </button>
+
+                      {/* Completed Tab */}
+                      <button
+                        type="button"
+                        onClick={() => setLifecycleTab('completed')}
+                        className={`inline-flex items-center gap-2 px-3.5 py-1.5 rounded-lg transition-all cursor-pointer ${
+                          lifecycleTab === 'completed'
+                            ? 'bg-white text-emerald-700 font-bold shadow-xs'
+                            : 'text-slate-600 hover:text-emerald-700'
+                        }`}
+                      >
+                        <span>Completed</span>
+                        <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-50 text-emerald-600 border border-emerald-200/60">
+                          {completedCount}
+                        </span>
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="inline-flex items-center gap-2 text-xs font-semibold text-[#292966]">
+                      <LayoutList className="w-4 h-4 text-[#5C5C99]" />
+                      <span>Showing All Sections (Upcoming, Past Due, Completed)</span>
+                    </div>
+                  )}
 
                   {/* Filter & Sort Controls */}
                   <div className="flex items-center gap-2 flex-wrap">
@@ -760,24 +867,34 @@ export default function StudentDashboardPage() {
                             >
                               All Courses ({tasks.length})
                             </button>
-                            {courses.map((course) => (
-                              <button
-                                key={course.id}
-                                type="button"
-                                onClick={() => {
-                                  setSelectedCourse(course.id);
-                                  setShowFilterDropdown(false);
-                                }}
-                                className={`w-full text-left py-2 px-3 leading-normal text-xs font-medium rounded-md transition-colors cursor-pointer ${
-                                  selectedCourse === course.id
-                                    ? 'bg-[#CCCCFF]/30 text-[#292966] font-semibold'
-                                    : 'text-slate-700 hover:bg-[#CCCCFF]/20 hover:text-[#292966]'
-                                }`}
-                              >
-                                <span className="font-semibold text-[#292966]">[{course.code}]</span>{' '}
-                                <span className="text-slate-600">{course.name}</span>
-                              </button>
-                            ))}
+                            {activeEnrolledCourses.map((course) => {
+                              const taskCount = tasks.filter(
+                                (t) =>
+                                  t.course_id === course.id ||
+                                  (t.course_code && t.course_code.toLowerCase() === course.code.toLowerCase())
+                              ).length;
+                              return (
+                                <button
+                                  key={course.id}
+                                  type="button"
+                                  onClick={() => {
+                                    setSelectedCourse(course.id);
+                                    setShowFilterDropdown(false);
+                                  }}
+                                  className={`w-full text-left py-2 px-3 leading-normal text-xs font-medium rounded-md transition-colors cursor-pointer flex items-center justify-between ${
+                                    selectedCourse === course.id
+                                      ? 'bg-[#CCCCFF]/30 text-[#292966] font-semibold'
+                                      : 'text-slate-700 hover:bg-[#CCCCFF]/20 hover:text-[#292966]'
+                                  }`}
+                                >
+                                  <div>
+                                    <span className="font-semibold text-[#292966]">[{course.code}]</span>{' '}
+                                    <span className="text-slate-600">{course.name}</span>
+                                  </div>
+                                  <span className="text-[10px] text-slate-400 font-mono ml-2">({taskCount})</span>
+                                </button>
+                              );
+                            })}
                           </div>
                         </div>
                       )}
@@ -824,19 +941,6 @@ export default function StudentDashboardPage() {
                           </button>
                           <button
                             onClick={() => {
-                              setSortOption('priority');
-                              setShowSortDropdown(false);
-                            }}
-                            className={`text-left px-3 py-1.5 rounded-md ${
-                              sortOption === 'priority'
-                                ? 'bg-[#CCCCFF]/30 text-[#292966] font-semibold'
-                                : 'hover:bg-slate-50 text-slate-700'
-                            }`}
-                          >
-                            Priority (Urgent first)
-                          </button>
-                          <button
-                            onClick={() => {
                               setSortOption('title_asc');
                               setShowSortDropdown(false);
                             }}
@@ -875,20 +979,216 @@ export default function StudentDashboardPage() {
                   </div>
                   <button
                     onClick={() => fetchTasks(userId)}
-                    className="underline font-semibold hover:text-rose-900"
+                    className="underline font-semibold hover:text-rose-900 cursor-pointer"
                   >
                     Retry
                   </button>
                 </div>
               )}
 
-              {/* Table Data Card */}
+              {/* Loading State */}
               {isLoading ? (
                 <div className="flex flex-col items-center justify-center py-20 gap-3 bg-white rounded-xl border border-slate-200/80 shadow-[0_1px_3px_rgba(0,0,0,0.03)]">
                   <RefreshCw className="w-6 h-6 text-[#292966] animate-spin" />
                   <p className="text-xs text-slate-500 font-medium">Loading assignments...</p>
                 </div>
+              ) : isGroupedView ? (
+                /* GROUPED VIEW: Vertically stacked sections with collapsible headers */
+                <div className="flex flex-col gap-6">
+                  {/* Section 1: Upcoming */}
+                  <div className="bg-white rounded-xl border border-slate-200/80 shadow-[0_1px_3px_rgba(0,0,0,0.03)] overflow-hidden flex flex-col">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setExpandedSections((prev) => ({ ...prev, upcoming: !prev.upcoming }))
+                      }
+                      className="w-full px-5 py-3.5 bg-slate-50/70 hover:bg-slate-100/70 border-b border-slate-100 flex items-center justify-between text-left transition-colors cursor-pointer"
+                    >
+                      <div className="flex items-center gap-2.5">
+                        <span className="w-2.5 h-2.5 rounded-full bg-[#292966]" />
+                        <h3 className="text-xs font-bold text-[#292966] uppercase tracking-wider">
+                          Upcoming Assignments
+                        </h3>
+                        <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-[#CCCCFF]/30 text-[#292966]">
+                          {filteredUpcoming.length}
+                        </span>
+                      </div>
+                      <div className="text-slate-400">
+                        {expandedSections.upcoming ? (
+                          <ChevronUp className="w-4 h-4" />
+                        ) : (
+                          <ChevronDown className="w-4 h-4" />
+                        )}
+                      </div>
+                    </button>
+
+                    {expandedSections.upcoming && (
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-left border-collapse">
+                          <thead>
+                            <tr className="border-b border-slate-100 bg-[#F8F9FC] text-[11px] font-semibold text-slate-500 uppercase tracking-wider">
+                              <th className="py-3 px-3.5 w-10 text-center">
+                                <span className="sr-only">Check</span>
+                              </th>
+                              <th className="py-3 px-3.5">TASK</th>
+                              <th className="py-3 px-3.5 w-44">COURSE</th>
+                              <th className="py-3 px-3.5 w-40">DUE DATE</th>
+                              <th className="py-3 px-3.5 w-32">URGENCY</th>
+                              <th className="py-3 px-3.5 w-28 text-right">ACTION</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-100">
+                            {filteredUpcoming.length === 0 ? (
+                              <tr>
+                                <td colSpan={6} className="py-10 text-center text-xs text-slate-400">
+                                  No upcoming assignments — you are all set for now! 🎉
+                                </td>
+                              </tr>
+                            ) : (
+                              filteredUpcoming.map((task) => (
+                                <TaskTableRow
+                                  key={task.id}
+                                  task={task}
+                                  onToggleStatus={handleToggleTaskStatus}
+                                />
+                              ))
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Section 2: Past Due */}
+                  <div className="bg-white rounded-xl border border-slate-200/80 shadow-[0_1px_3px_rgba(0,0,0,0.03)] overflow-hidden flex flex-col">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setExpandedSections((prev) => ({ ...prev, past_due: !prev.past_due }))
+                      }
+                      className="w-full px-5 py-3.5 bg-rose-50/50 hover:bg-rose-50/80 border-b border-rose-100/80 flex items-center justify-between text-left transition-colors cursor-pointer"
+                    >
+                      <div className="flex items-center gap-2.5">
+                        <span className="w-2.5 h-2.5 rounded-full bg-rose-500" />
+                        <h3 className="text-xs font-bold text-rose-800 uppercase tracking-wider">
+                          Past Due Assignments
+                        </h3>
+                        <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-rose-100 text-rose-700">
+                          {filteredPastDue.length}
+                        </span>
+                      </div>
+                      <div className="text-slate-400">
+                        {expandedSections.past_due ? (
+                          <ChevronUp className="w-4 h-4" />
+                        ) : (
+                          <ChevronDown className="w-4 h-4" />
+                        )}
+                      </div>
+                    </button>
+
+                    {expandedSections.past_due && (
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-left border-collapse">
+                          <thead>
+                            <tr className="border-b border-slate-100 bg-[#F8F9FC] text-[11px] font-semibold text-slate-500 uppercase tracking-wider">
+                              <th className="py-3 px-3.5 w-10 text-center">
+                                <span className="sr-only">Check</span>
+                              </th>
+                              <th className="py-3 px-3.5">TASK</th>
+                              <th className="py-3 px-3.5 w-44">COURSE</th>
+                              <th className="py-3 px-3.5 w-40">DUE DATE</th>
+                              <th className="py-3 px-3.5 w-32">URGENCY</th>
+                              <th className="py-3 px-3.5 w-28 text-right">ACTION</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-100">
+                            {filteredPastDue.length === 0 ? (
+                              <tr>
+                                <td colSpan={6} className="py-10 text-center text-xs text-slate-400">
+                                  No past due assignments — great job!
+                                </td>
+                              </tr>
+                            ) : (
+                              filteredPastDue.map((task) => (
+                                <TaskTableRow
+                                  key={task.id}
+                                  task={task}
+                                  onToggleStatus={handleToggleTaskStatus}
+                                />
+                              ))
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Section 3: Completed */}
+                  <div className="bg-white rounded-xl border border-slate-200/80 shadow-[0_1px_3px_rgba(0,0,0,0.03)] overflow-hidden flex flex-col">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setExpandedSections((prev) => ({ ...prev, completed: !prev.completed }))
+                      }
+                      className="w-full px-5 py-3.5 bg-emerald-50/40 hover:bg-emerald-50/70 border-b border-emerald-100/70 flex items-center justify-between text-left transition-colors cursor-pointer"
+                    >
+                      <div className="flex items-center gap-2.5">
+                        <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                        <h3 className="text-xs font-bold text-emerald-800 uppercase tracking-wider">
+                          Completed Deliverables
+                        </h3>
+                        <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-100 text-emerald-800">
+                          {filteredCompleted.length}
+                        </span>
+                      </div>
+                      <div className="text-slate-400">
+                        {expandedSections.completed ? (
+                          <ChevronUp className="w-4 h-4" />
+                        ) : (
+                          <ChevronDown className="w-4 h-4" />
+                        )}
+                      </div>
+                    </button>
+
+                    {expandedSections.completed && (
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-left border-collapse">
+                          <thead>
+                            <tr className="border-b border-slate-100 bg-[#F8F9FC] text-[11px] font-semibold text-slate-500 uppercase tracking-wider">
+                              <th className="py-3 px-3.5 w-10 text-center">
+                                <span className="sr-only">Check</span>
+                              </th>
+                              <th className="py-3 px-3.5">TASK</th>
+                              <th className="py-3 px-3.5 w-44">COURSE</th>
+                              <th className="py-3 px-3.5 w-40">DUE DATE</th>
+                              <th className="py-3 px-3.5 w-32">URGENCY</th>
+                              <th className="py-3 px-3.5 w-28 text-right">ACTION</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-100">
+                            {filteredCompleted.length === 0 ? (
+                              <tr>
+                                <td colSpan={6} className="py-10 text-center text-xs text-slate-400">
+                                  No completed assignments yet. Check off items as you finish them!
+                                </td>
+                              </tr>
+                            ) : (
+                              filteredCompleted.map((task) => (
+                                <TaskTableRow
+                                  key={task.id}
+                                  task={task}
+                                  onToggleStatus={handleToggleTaskStatus}
+                                />
+                              ))
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+                </div>
               ) : (
+                /* TABBED VIEW: High-Density Table with Category Empty States & Pagination */
                 <div className="bg-white rounded-xl border border-slate-200/80 shadow-[0_1px_3px_rgba(0,0,0,0.03)] overflow-hidden flex flex-col">
                   {/* Responsive Table Wrapper */}
                   <div className="overflow-x-auto">
@@ -910,11 +1210,21 @@ export default function StudentDashboardPage() {
                           <tr>
                             <td colSpan={6} className="py-16 text-center text-xs text-slate-500">
                               <div className="flex flex-col items-center gap-1.5">
-                                <p className="font-semibold text-sm text-[#292966]">No assignments found</p>
+                                <p className="font-semibold text-sm text-[#292966]">
+                                  {lifecycleTab === 'past_due'
+                                    ? 'No past due assignments — great job! 🎉'
+                                    : lifecycleTab === 'completed'
+                                    ? 'No completed assignments yet'
+                                    : 'No upcoming assignments found'}
+                                </p>
                                 <p className="text-xs text-slate-400 max-w-sm">
                                   {searchQuery || selectedCourse !== 'all'
-                                    ? 'No tasks match your active search or filters.'
-                                    : 'Scan your MS Teams course channels with the Hark extension to ingest assignments.'}
+                                    ? 'No tasks match your active search or filters in this view.'
+                                    : lifecycleTab === 'past_due'
+                                    ? 'All your assignments are on track and within deadline.'
+                                    : lifecycleTab === 'completed'
+                                    ? 'Check off assignments in Upcoming or Past Due to track your completed work.'
+                                    : 'Scan your MS Teams course channels with the Hark extension to ingest upcoming deadlines.'}
                                 </p>
                                 {(searchQuery || selectedCourse !== 'all') && (
                                   <button
@@ -949,14 +1259,19 @@ export default function StudentDashboardPage() {
                       <span>
                         Showing{' '}
                         <strong className="text-[#292966]">
-                          {filteredTasks.length === 0 ? 0 : (currentPage - 1) * pageSize + 1}
+                          {activeCategoryList.length === 0 ? 0 : (currentPage - 1) * pageSize + 1}
                         </strong>{' '}
                         to{' '}
                         <strong className="text-[#292966]">
-                          {Math.min(currentPage * pageSize, filteredTasks.length)}
+                          {Math.min(currentPage * pageSize, activeCategoryList.length)}
                         </strong>{' '}
-                        of <strong className="text-[#292966]">{filteredTasks.length}</strong> tasks &bull;{' '}
-                        Page {currentPage} of {totalPages}
+                        of <strong className="text-[#292966]">{activeCategoryList.length}</strong>{' '}
+                        {lifecycleTab === 'past_due'
+                          ? 'past due'
+                          : lifecycleTab === 'completed'
+                          ? 'completed'
+                          : 'upcoming'}{' '}
+                        tasks &bull; Page {currentPage} of {totalPages}
                       </span>
                     </div>
 
@@ -1011,17 +1326,21 @@ export default function StudentDashboardPage() {
 
               {/* Courses Grid */}
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                {courses.length === 0 ? (
+                {activeEnrolledCourses.length === 0 ? (
                   <div className="col-span-full py-16 text-center bg-white rounded-xl border border-slate-200/80 p-6 text-xs text-slate-500">
                     <BookOpen className="w-8 h-8 text-slate-400 mx-auto mb-2" />
-                    <p className="font-semibold text-sm text-[#292966]">No courses discovered yet</p>
+                    <p className="font-semibold text-sm text-[#292966]">No active enrolled courses discovered yet</p>
                     <p className="text-xs text-slate-400 mt-1 max-w-sm mx-auto">
-                      Scan your MS Teams channels with the Hark extension to automatically import all your enrolled classes.
+                      Scan your MS Teams channels with the Hark extension to automatically import all your active enrolled classes.
                     </p>
                   </div>
                 ) : (
-                  courses.map((course) => {
-                    const taskCount = tasks.filter((t) => t.course_id === course.id).length;
+                  activeEnrolledCourses.map((course) => {
+                    const taskCount = tasks.filter(
+                      (t) =>
+                        t.course_id === course.id ||
+                        (t.course_code && t.course_code.toLowerCase() === course.code.toLowerCase())
+                    ).length;
                     const initial = course.code ? course.code.charAt(0).toUpperCase() : 'C';
 
                     return (
@@ -1071,7 +1390,7 @@ export default function StudentDashboardPage() {
                             href="https://teams.microsoft.com/v2/"
                             target="_blank"
                             rel="noopener noreferrer"
-                            className="p-1.5 rounded-lg border border-slate-200 hover:bg-slate-50 text-slate-400 hover:text-[#292966] transition-colors"
+                            className="p-1.5 rounded-lg border border-slate-200 hover:bg-slate-50 text-slate-400 hover:text-[#292966] transition-colors cursor-pointer"
                             title="Open in Teams"
                           >
                             <ExternalLink className="w-3.5 h-3.5" />
@@ -1098,7 +1417,7 @@ export default function StudentDashboardPage() {
               </div>
               <button
                 onClick={() => setShowSettingsModal(false)}
-                className="p-1 rounded-lg text-slate-400 hover:text-[#292966] hover:bg-slate-50"
+                className="p-1 rounded-lg text-slate-400 hover:text-[#292966] hover:bg-slate-50 cursor-pointer"
               >
                 <X className="w-5 h-5" />
               </button>

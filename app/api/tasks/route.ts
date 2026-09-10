@@ -61,7 +61,7 @@ export async function GET(req: NextRequest) {
       ORDER BY t.due_date ASC, t.created_at DESC;
     `;
 
-    // Query all courses for course view and filters
+    // Query active student enrolled courses for course view and filters (filtering ghost/phantom courses)
     const courses = await sql`
       SELECT 
         c.id, 
@@ -73,7 +73,11 @@ export async function GET(req: NextRequest) {
       FROM courses c
       LEFT JOIN tasks t ON t.course_id = c.id
       WHERE c.user_id = ${userId}::uuid
+        AND c.code != 'MAIN'
+        AND c.name NOT ILIKE '%main channels%'
+        AND c.name NOT ILIKE '%teams and channels%'
       GROUP BY c.id, c.code, c.name, c.channel_id, c.created_at
+      HAVING COUNT(t.id) > 0
       ORDER BY c.code ASC;
     `;
 

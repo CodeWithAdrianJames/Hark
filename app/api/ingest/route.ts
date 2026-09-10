@@ -605,6 +605,15 @@ async function resolveCourseForUser(
       ? targetCode.toUpperCase()
       : extractCourseCode(cleanName);
 
+  if (
+    cleanCode === 'MAIN' ||
+    cleanName.toLowerCase() === 'main channels' ||
+    cleanName.toLowerCase() === 'teams and channels' ||
+    cleanName.toLowerCase() === 'microsoft teams'
+  ) {
+    return null;
+  }
+
   // 1. Try matching existing course for this user (by exact code or name)
   const matched = userCourses.find(
     (c) =>
@@ -661,6 +670,8 @@ export async function POST(req: NextRequest) {
         assignmentId?: string;
         assignment_id?: string;
         id?: string;
+        classId?: string;
+        channelId?: string;
         title?: string;
         courseName?: string;
         courseCode?: string;
@@ -748,58 +759,130 @@ export async function POST(req: NextRequest) {
           ''
         ).trim() || null;
 
-        // Universal tenant-agnostic fallback for deep_link:
-        const deepLink = 'https://teams.microsoft.com/v2/';
+        const classId = (
+          item.classId ||
+          (item as any).channelId ||
+          (item as any).class_id ||
+          ''
+        ).trim() || null;
+
+        // Resolve deep_link
+        const deepLink = (
+          item.deepLink ||
+          (item as any).directPortalUrl ||
+          (item as any).teamsAppDeepLink ||
+          (item as any).source_url ||
+          'https://teams.microsoft.com/v2/'
+        ).trim();
+
         const description = item.description?.trim() || null;
 
-        const result = await sql`
-          INSERT INTO tasks (
-            user_id,
-            course_id,
-            course_name,
-            assignment_id,
-            title,
-            description,
-            due_date,
-            source_type,
-            source_url,
-            deep_link,
-            urgency,
-            raw_message_hash,
-            status,
-            created_at,
-            updated_at
-          )
-          VALUES (
-            ${userId}::uuid,
-            ${courseId ? courseId : null},
-            ${cleanName},
-            ${assignmentId},
-            ${title},
-            ${description},
-            ${dueDateIso}::timestamptz,
-            'official_assignment',
-            ${deepLink},
-            ${deepLink},
-            'upcoming',
-            ${rawHash},
-            'pending',
-            NOW(),
-            NOW()
-          )
-          ON CONFLICT (user_id, raw_message_hash)
-          DO UPDATE SET
-            assignment_id = EXCLUDED.assignment_id,
-            deep_link = EXCLUDED.deep_link,
-            title = EXCLUDED.title,
-            course_name = EXCLUDED.course_name,
-            course_id = COALESCE(EXCLUDED.course_id, tasks.course_id),
-            due_date = EXCLUDED.due_date,
-            description = COALESCE(EXCLUDED.description, tasks.description),
-            source_url = EXCLUDED.deep_link,
-            updated_at = NOW()
-          RETURNING (xmax = 0) AS is_insert, id, title, due_date, source_url, deep_link, assignment_id;
-        `;
+        let result;
+        if (assignmentId) {
+          result = await sql`
+            INSERT INTO tasks (
+              user_id,
+              assignment_id,
+              raw_message_hash,
+              title,
+              course_name,
+              course_id,
+              class_id,
+              due_date,
+              deep_link,
+              source_url,
+              description,
+              source_type,
+              urgency,
+              status,
+              is_completed,
+              created_at,
+              updated_at
+            )
+            VALUES (
+              ${userId}::uuid,
+              ${assignmentId},
+              ${rawHash},
+              ${title},
+              ${cleanName},
+              ${courseId ? courseId : null},
+              ${classId},
+              ${dueDateIso}::timestamptz,
+              ${deepLink},
+              ${deepLink},
+              ${description},
+              'official_assignment',
+              'upcoming',
+              'pending',
+              false,
+              NOW(),
+              NOW()
+            )
+            ON CONFLICT (user_id, assignment_id)
+            DO UPDATE SET
+              title = EXCLUDED.title,
+              course_name = EXCLUDED.course_name,
+              course_id = COALESCE(EXCLUDED.course_id, tasks.course_id),
+              class_id = COALESCE(EXCLUDED.class_id, tasks.class_id),
+              due_date = EXCLUDED.due_date,
+              deep_link = EXCLUDED.deep_link,
+              source_url = EXCLUDED.source_url,
+              description = COALESCE(EXCLUDED.description, tasks.description),
+              updated_at = NOW()
+            RETURNING (xmax = 0) AS is_insert, id, title, due_date, source_url, deep_link, assignment_id;
+          `;
+        } else {
+          result = await sql`
+            INSERT INTO tasks (
+              user_id,
+              course_id,
+              course_name,
+              class_id,
+              title,
+              description,
+              due_date,
+              source_type,
+              source_url,
+              deep_link,
+              urgency,
+              raw_message_hash,
+              status,
+              is_completed,
+              created_at,
+              updated_at
+            )
+            VALUES (
+              ${userId}::uuid,
+              ${courseId ? courseId : null},
+              ${cleanName},
+              ${classId},
+              ${title},
+              ${description},
+              ${dueDateIso}::timestamptz,
+              'official_assignment',
+              ${deepLink},
+              ${deepLink},
+              'upcoming',
+              ${rawHash},
+              'pending',
+              false,
+              NOW(),
+              NOW()
+            )
+            ON CONFLICT (user_id, raw_message_hash)
+            DO UPDATE SET
+              deep_link = EXCLUDED.deep_link,
+              title = EXCLUDED.title,
+              course_name = EXCLUDED.course_name,
+              course_id = COALESCE(EXCLUDED.course_id, tasks.course_id),
+              class_id = COALESCE(EXCLUDED.class_id, tasks.class_id),
+              due_date = EXCLUDED.due_date,
+              description = COALESCE(EXCLUDED.description, tasks.description),
+              source_url = EXCLUDED.deep_link,
+              updated_at = NOW()
+            RETURNING (xmax = 0) AS is_insert, id, title, due_date, source_url, deep_link, assignment_id;
+          `;
+        }
 
         if (result && result.length > 0) {
           if (result[0].is_insert) {
@@ -814,6 +897,33 @@ export async function POST(req: NextRequest) {
       console.log(
         `[Fast-Path] Processed ${assignments.length} assignments: ${insertedCount} inserted, ${updatedCount} updated, 0 skipped.`
       );
+
+      // Automatic cleanup: deduplicate task rows retaining latest entry per (user_id, assignment_id) or matching title/course
+      try {
+        await sql`
+          DELETE FROM tasks a USING tasks b
+          WHERE a.id < b.id 
+            AND a.user_id = b.user_id 
+            AND (
+              (a.assignment_id IS NOT NULL AND b.assignment_id IS NOT NULL AND a.assignment_id = b.assignment_id)
+              OR (a.title = b.title AND COALESCE(a.course_name, '') = COALESCE(b.course_name, ''))
+            );
+        `;
+        await sql`
+          DELETE FROM tasks a USING tasks b
+          WHERE a.user_id = b.user_id
+            AND a.title = b.title
+            AND a.assignment_id IS NULL
+            AND b.assignment_id IS NOT NULL;
+        `;
+        await sql`
+          DELETE FROM tasks
+          WHERE user_id = ${userId}::uuid
+            AND LENGTH(TRIM(title)) <= 2;
+        `;
+      } catch (cleanupErr) {
+        console.warn('[Fast-Path] Post-sync cleanup warning:', cleanupErr);
+      }
 
       // Query active user tasks joined with courses so dashboard receives the full fresh list
       const cleanTasks = await sql`
@@ -830,10 +940,12 @@ export async function POST(req: NextRequest) {
           COALESCE(t.deep_link, t.source_url) AS deep_link,
           t.raw_message_hash,
           t.status,
+          COALESCE(t.is_completed, t.status = 'completed') AS is_completed,
+          COALESCE(t.is_completed, t.status = 'completed') AS completed,
           t.created_at,
           c.code AS course_code,
           c.name AS course_name,
-          c.channel_id AS class_id
+          COALESCE(t.class_id, c.channel_id) AS class_id
         FROM tasks t
         LEFT JOIN courses c ON t.course_id = c.id
         WHERE t.user_id = ${userId}::uuid

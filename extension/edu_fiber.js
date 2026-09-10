@@ -9,7 +9,7 @@
 
   function extractPropsFromCard(cardEl) {
     try {
-      if (cardEl.getAttribute('data-hark-fiber-deeplink')) return;
+      if (cardEl.getAttribute('data-hark-fiber-deeplink') && cardEl.getAttribute('data-hark-title')) return;
 
       const fiberKey = Object.keys(cardEl).find(
         (k) => k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance')
@@ -21,9 +21,13 @@
         const p = cur.memoizedProps;
         if (p) {
           const candidate = p.assignment || p.item || p.cardData || p;
-          if (candidate && (candidate.classId || candidate.courseId)) {
+          if (candidate && (candidate.classId || candidate.courseId || candidate.id || candidate.displayName || candidate.title)) {
             const classId = candidate.classId || candidate.courseId || candidate.classDetails?.id;
-            const assignmentId = candidate.id || cardEl.id;
+            const assignmentId = candidate.id || cardEl.id || candidate.assignmentId;
+            const fullTitle = candidate.displayName || candidate.title || candidate.name || candidate.assignmentTitle;
+            const fullClassName = candidate.className || candidate.classDetails?.displayName || candidate.courseName;
+            const dueDate = candidate.dueDateTime || candidate.dueDate;
+
             if (classId && assignmentId) {
               const directPortalUrl = `https://assignments.edu.cloud.microsoft/classes/${classId}/assignments/${assignmentId}`;
               const teamsAppDeepLink = `https://teams.microsoft.com/l/entity/2a84b049-50bc-4535-a646-5677a8207868/classroom?context=${encodeURIComponent(
@@ -37,12 +41,23 @@
               cardEl.setAttribute('data-hark-teams-link', teamsAppDeepLink);
               cardEl.setAttribute('data-hark-class-id', String(classId));
               cardEl.setAttribute('data-hark-assignment-id', String(assignmentId));
+            }
+            if (fullTitle) {
+              cardEl.setAttribute('data-hark-title', String(fullTitle).trim());
+            }
+            if (fullClassName) {
+              cardEl.setAttribute('data-hark-class-name', String(fullClassName).trim());
+            }
+            if (dueDate) {
+              cardEl.setAttribute('data-hark-due-date', String(dueDate).trim());
+            }
+            if (classId && assignmentId && fullTitle) {
               console.log(
-                '%c[Hark Fiber]%c Stamped assignment direct portal & teams links:',
+                '%c[Hark Fiber]%c Stamped assignment with full title & links:',
                 LOG_STYLE,
                 'color: #10b981;',
                 assignmentId,
-                directPortalUrl
+                fullTitle
               );
               break;
             }
