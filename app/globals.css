@@ -6,15 +6,16 @@
   --color-hark-purple: #5C5C99;
   --color-hark-muted: #A3A3CC;
   --color-hark-light: #CCCCFF;
+  --color-hark-canvas: #FAFAFC;
   --color-hark-bg: #F8F9FD;
 }
 
 :root {
-  --bg-base: #F8F9FD;
+  --bg-base: #FAFAFC;
   --bg-surface: #FFFFFF;
-  --text-primary: #292966;
+  --text-primary: #0F172A;
   --text-secondary: #5C5C99;
-  --border-subtle: #E5E7EB;
+  --border-subtle: #E2E8F0;
 }
 
 body {
@@ -22,12 +23,48 @@ body {
   color: var(--text-primary);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Tabular numbers for deadlines & counts */
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Linear / Raycast Style Tactile Button Utilities */
+.btn-primary-tactile {
+  background-color: #292966;
+  border: 1px solid #1F1F4D;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18), 0 1px 2px rgba(0, 0, 0, 0.08);
+  transition: all 120ms ease;
+}
+.btn-primary-tactile:hover {
+  background-color: #1F1F4D;
+}
+.btn-primary-tactile:active {
+  transform: scale(0.98);
+}
+
+.btn-ghost-tactile {
+  background-color: #FFFFFF;
+  border: 1px solid #E2E8F0;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+  transition: all 120ms ease;
+}
+.btn-ghost-tactile:hover {
+  background-color: #F8FAFC;
+  border-color: #CBD5E1;
+  color: #292966;
+}
+.btn-ghost-tactile:active {
+  transform: scale(0.98);
 }
 
 /* Custom Clean SaaS Scrollbar */
 ::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+  width: 5px;
+  height: 5px;
 }
 
 ::-webkit-scrollbar-track {
@@ -35,10 +72,11 @@ body {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #CCCCFF;
+  background: #CBD5E1;
   border-radius: 9999px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #A3A3CC;
+  background: #94A3B8;
 }
+
