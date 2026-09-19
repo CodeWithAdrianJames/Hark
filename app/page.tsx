@@ -105,6 +105,7 @@ export default function StudentDashboardPage() {
   const searchInputRef = useRef<HTMLInputElement>(null);
   const filterMenuRef = useRef<HTMLDivElement>(null);
   const sortMenuRef = useRef<HTMLDivElement>(null);
+  const userManuallySelectedTabRef = useRef<boolean>(false);
 
   // Fetch tasks and courses for current user
   const fetchTasks = useCallback(
@@ -258,6 +259,25 @@ export default function StudentDashboardPage() {
   const upcomingCount = upcoming.length;
   const pastDueCount = pastDue.length;
   const completedCount = completed.length;
+
+  // Smart Initial Tab Selection: If student has 0 upcoming deadlines but has active past-due deliverables,
+  // automatically default to 'past_due' so they aren't greeted with a blank "0 Tasks" screen.
+  useEffect(() => {
+    if (!userManuallySelectedTabRef.current && tasks.length > 0) {
+      if (upcoming.length === 0 && pastDue.length > 0) {
+        setLifecycleTab('past_due');
+      } else if (upcoming.length > 0) {
+        setLifecycleTab('upcoming');
+      }
+    }
+  }, [tasks, upcoming.length, pastDue.length]);
+
+  // User tab selection handler
+  const handleSelectLifecycleTab = (tab: LifecycleCategory) => {
+    userManuallySelectedTabRef.current = true;
+    setLifecycleTab(tab);
+    setIsGroupedView(false);
+  };
 
   // Active student enrolled courses: strictly filter out ghost/phantom courses and courses without active/past-due deliverables
   const activeEnrolledCourses = useMemo(() => {
@@ -651,10 +671,7 @@ export default function StudentDashboardPage() {
               <section className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                 {/* Card 1: Upcoming Tasks */}
                 <div
-                  onClick={() => {
-                    setLifecycleTab('upcoming');
-                    setIsGroupedView(false);
-                  }}
+                  onClick={() => handleSelectLifecycleTab('upcoming')}
                   className={`p-4 rounded-xl bg-white border shadow-[0_1px_3px_rgba(0,0,0,0.03)] flex items-center justify-between cursor-pointer transition-all hover:border-[#CCCCFF] active:scale-[0.99] ${
                     lifecycleTab === 'upcoming' && !isGroupedView
                       ? 'border-[#292966] ring-1 ring-[#292966]/20'
@@ -673,10 +690,7 @@ export default function StudentDashboardPage() {
 
                 {/* Card 2: Past Due */}
                 <div
-                  onClick={() => {
-                    setLifecycleTab('past_due');
-                    setIsGroupedView(false);
-                  }}
+                  onClick={() => handleSelectLifecycleTab('past_due')}
                   className={`p-4 rounded-xl border shadow-[0_1px_3px_rgba(0,0,0,0.03)] flex items-center justify-between cursor-pointer transition-all active:scale-[0.99] ${
                     pastDueCount > 0
                       ? 'bg-rose-50/50 border-rose-200/80 hover:border-rose-300'
@@ -707,10 +721,7 @@ export default function StudentDashboardPage() {
 
                 {/* Card 3: Completed */}
                 <div
-                  onClick={() => {
-                    setLifecycleTab('completed');
-                    setIsGroupedView(false);
-                  }}
+                  onClick={() => handleSelectLifecycleTab('completed')}
                   className={`p-4 rounded-xl bg-white border shadow-[0_1px_3px_rgba(0,0,0,0.03)] flex items-center justify-between cursor-pointer transition-all hover:border-[#CCCCFF] active:scale-[0.99] ${
                     lifecycleTab === 'completed' && !isGroupedView
                       ? 'border-emerald-600 ring-1 ring-emerald-600/20'
@@ -775,7 +786,7 @@ export default function StudentDashboardPage() {
                       {/* Upcoming Tab */}
                       <button
                         type="button"
-                        onClick={() => setLifecycleTab('upcoming')}
+                        onClick={() => handleSelectLifecycleTab('upcoming')}
                         className={`inline-flex items-center gap-2 px-3.5 py-1.5 rounded-lg transition-all cursor-pointer ${
                           lifecycleTab === 'upcoming'
                             ? 'bg-white text-[#292966] font-bold shadow-xs'
@@ -791,7 +802,7 @@ export default function StudentDashboardPage() {
                       {/* Past Due Tab */}
                       <button
                         type="button"
-                        onClick={() => setLifecycleTab('past_due')}
+                        onClick={() => handleSelectLifecycleTab('past_due')}
                         className={`inline-flex items-center gap-2 px-3.5 py-1.5 rounded-lg transition-all cursor-pointer ${
                           lifecycleTab === 'past_due'
                             ? 'bg-white text-rose-700 font-bold shadow-xs'
@@ -807,7 +818,7 @@ export default function StudentDashboardPage() {
                       {/* Completed Tab */}
                       <button
                         type="button"
-                        onClick={() => setLifecycleTab('completed')}
+                        onClick={() => handleSelectLifecycleTab('completed')}
                         className={`inline-flex items-center gap-2 px-3.5 py-1.5 rounded-lg transition-all cursor-pointer ${
                           lifecycleTab === 'completed'
                             ? 'bg-white text-emerald-700 font-bold shadow-xs'
@@ -986,11 +997,35 @@ export default function StudentDashboardPage() {
                 </div>
               )}
 
-              {/* Loading State */}
+              {/* Loading State: Clean SaaS Skeleton */}
               {isLoading ? (
-                <div className="flex flex-col items-center justify-center py-20 gap-3 bg-white rounded-xl border border-slate-200/80 shadow-[0_1px_3px_rgba(0,0,0,0.03)]">
-                  <RefreshCw className="w-6 h-6 text-[#292966] animate-spin" />
-                  <p className="text-xs text-slate-500 font-medium">Loading assignments...</p>
+                <div className="bg-white rounded-xl border border-slate-200/80 shadow-[0_1px_3px_rgba(0,0,0,0.03)] overflow-hidden p-4 flex flex-col gap-3">
+                  <div className="flex items-center justify-between pb-2 border-b border-slate-100">
+                    <div className="h-4 w-44 bg-slate-200 rounded animate-pulse" />
+                    <div className="h-4 w-20 bg-slate-100 rounded animate-pulse" />
+                  </div>
+                  <div className="space-y-2.5">
+                    {[1, 2, 3, 4, 5, 6].map((i) => (
+                      <div
+                        key={i}
+                        className="h-12 w-full bg-slate-50/70 border border-slate-100 rounded-lg flex items-center justify-between px-3.5 animate-pulse"
+                      >
+                        <div className="flex items-center gap-3">
+                          <div className="w-4.5 h-4.5 rounded border border-slate-200 bg-slate-200" />
+                          <div className="flex flex-col gap-1.5">
+                            <div className="h-3.5 w-60 bg-slate-200 rounded" />
+                            <div className="h-2.5 w-32 bg-slate-100 rounded" />
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-4">
+                          <div className="h-6 w-28 bg-[#CCCCFF]/30 rounded-full" />
+                          <div className="h-3.5 w-24 bg-slate-200 rounded" />
+                          <div className="h-6 w-20 bg-slate-200 rounded-full" />
+                          <div className="h-7 w-16 bg-[#292966]/15 rounded-lg" />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               ) : isGroupedView ? (
                 /* GROUPED VIEW: Vertically stacked sections with collapsible headers */
@@ -1209,33 +1244,110 @@ export default function StudentDashboardPage() {
                         {paginatedTasks.length === 0 ? (
                           <tr>
                             <td colSpan={6} className="py-16 text-center text-xs text-slate-500">
-                              <div className="flex flex-col items-center gap-1.5">
-                                <p className="font-semibold text-sm text-[#292966]">
-                                  {lifecycleTab === 'past_due'
-                                    ? 'No past due assignments — great job! 🎉'
-                                    : lifecycleTab === 'completed'
-                                    ? 'No completed assignments yet'
-                                    : 'No upcoming assignments found'}
-                                </p>
-                                <p className="text-xs text-slate-400 max-w-sm">
-                                  {searchQuery || selectedCourse !== 'all'
-                                    ? 'No tasks match your active search or filters in this view.'
-                                    : lifecycleTab === 'past_due'
-                                    ? 'All your assignments are on track and within deadline.'
-                                    : lifecycleTab === 'completed'
-                                    ? 'Check off assignments in Upcoming or Past Due to track your completed work.'
-                                    : 'Scan your MS Teams course channels with the Hark extension to ingest upcoming deadlines.'}
-                                </p>
-                                {(searchQuery || selectedCourse !== 'all') && (
-                                  <button
-                                    onClick={() => {
-                                      setSearchQuery('');
-                                      setSelectedCourse('all');
-                                    }}
-                                    className="mt-2 text-xs font-semibold text-[#292966] underline cursor-pointer"
-                                  >
-                                    Clear all filters
-                                  </button>
+                              <div className="flex flex-col items-center gap-2 py-4">
+                                {searchQuery || selectedCourse !== 'all' ? (
+                                  <>
+                                    <p className="font-semibold text-sm text-[#292966]">
+                                      No assignments found matching filters
+                                    </p>
+                                    <p className="text-xs text-slate-400 max-w-sm">
+                                      Try clearing your search query or selecting &quot;All Courses&quot;.
+                                    </p>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setSearchQuery('');
+                                        setSelectedCourse('all');
+                                      }}
+                                      className="mt-2 text-xs font-semibold text-[#292966] underline cursor-pointer"
+                                    >
+                                      Clear all filters
+                                    </button>
+                                  </>
+                                ) : lifecycleTab === 'upcoming' ? (
+                                  <>
+                                    <p className="font-semibold text-sm text-[#292966]">
+                                      No upcoming assignments found
+                                    </p>
+                                    {pastDueCount > 0 ? (
+                                      <>
+                                        <p className="text-xs text-slate-500 max-w-md text-center leading-relaxed">
+                                          You currently have{' '}
+                                          <strong className="text-rose-600 font-semibold">
+                                            {pastDueCount} past-due assignment{pastDueCount > 1 ? 's' : ''}
+                                          </strong>{' '}
+                                          that require your immediate attention.
+                                        </p>
+                                        <button
+                                          type="button"
+                                          onClick={() => handleSelectLifecycleTab('past_due')}
+                                          className="mt-2 inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-rose-600 hover:bg-rose-700 text-white text-xs font-semibold shadow-xs transition-all cursor-pointer"
+                                        >
+                                          <AlertTriangle className="w-3.5 h-3.5" />
+                                          <span>View Past Due Assignments ({pastDueCount})</span>
+                                        </button>
+                                      </>
+                                    ) : (
+                                      <>
+                                        <p className="text-xs text-slate-400 max-w-sm text-center">
+                                          You are completely caught up! Scan your MS Teams course channels to capture newly posted deliverables.
+                                        </p>
+                                        <button
+                                          type="button"
+                                          onClick={handleSyncWithTeams}
+                                          disabled={isRefreshing}
+                                          className="mt-2 inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-[#292966] hover:bg-[#1E1E4F] text-white text-xs font-medium shadow-xs transition-all cursor-pointer"
+                                        >
+                                          <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin' : ''}`} />
+                                          <span>Sync with Teams</span>
+                                        </button>
+                                      </>
+                                    )}
+                                  </>
+                                ) : lifecycleTab === 'past_due' ? (
+                                  <>
+                                    <p className="font-semibold text-sm text-[#292966]">
+                                      No past-due assignments — great job! 🎉
+                                    </p>
+                                    {upcomingCount > 0 ? (
+                                      <>
+                                        <p className="text-xs text-slate-500 max-w-sm text-center">
+                                          All past deliverables are cleared. You have{' '}
+                                          <strong className="text-[#292966] font-semibold">{upcomingCount}</strong> upcoming task{upcomingCount > 1 ? 's' : ''}.
+                                        </p>
+                                        <button
+                                          type="button"
+                                          onClick={() => handleSelectLifecycleTab('upcoming')}
+                                          className="mt-2 inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-[#292966] hover:bg-[#1E1E4F] text-white text-xs font-semibold shadow-xs transition-all cursor-pointer"
+                                        >
+                                          <Clock className="w-3.5 h-3.5" />
+                                          <span>View Upcoming ({upcomingCount})</span>
+                                        </button>
+                                      </>
+                                    ) : (
+                                      <p className="text-xs text-slate-400 max-w-sm text-center">
+                                        All your assignments are on track and within deadline.
+                                      </p>
+                                    )}
+                                  </>
+                                ) : (
+                                  <>
+                                    <p className="font-semibold text-sm text-[#292966]">
+                                      No completed assignments yet
+                                    </p>
+                                    <p className="text-xs text-slate-400 max-w-sm text-center">
+                                      Check off tasks in Upcoming or Past Due as you submit them to track your progress.
+                                    </p>
+                                    {upcomingCount + pastDueCount > 0 && (
+                                      <button
+                                        type="button"
+                                        onClick={() => handleSelectLifecycleTab(upcomingCount > 0 ? 'upcoming' : 'past_due')}
+                                        className="mt-2 inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-[#292966] hover:bg-[#1E1E4F] text-white text-xs font-semibold shadow-xs transition-all cursor-pointer"
+                                      >
+                                        <span>View Active Tasks ({upcomingCount + pastDueCount})</span>
+                                      </button>
+                                    )}
+                                  </>
                                 )}
                               </div>
                             </td>

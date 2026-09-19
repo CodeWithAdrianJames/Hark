@@ -304,7 +304,7 @@ export const TaskTableRow: React.FC<TaskTableRowProps> = ({
               </button>
 
               {isMenuOpen && (
-                <div className="absolute right-0 mt-1 w-44 rounded-xl bg-white border border-slate-200 shadow-xl py-1 z-30 text-xs">
+                <div className="absolute right-0 mt-1 w-44 rounded-xl bg-white border border-slate-200/90 shadow-2xl py-1 z-50 text-xs">
                   <a
                     href={googleCalUrl}
                     target="_blank"

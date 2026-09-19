@@ -99,7 +99,14 @@ function cleanCourseName(raw: string | null | undefined): string {
     lowerFinal === 'conversations' ||
     lowerFinal === 'chat' ||
     lowerFinal === 'null' ||
-    lowerFinal === 'undefined'
+    lowerFinal === 'undefined' ||
+    lowerFinal === 'main channels' ||
+    lowerFinal === 'teams and channels' ||
+    lowerFinal === 'department announcements' ||
+    lowerFinal === 'broadcast' ||
+    lowerFinal === 'broadcasts' ||
+    lowerFinal === 'faculty' ||
+    lowerFinal === "dean's office"
   ) {
     return '';
   }
@@ -522,24 +529,41 @@ function parseAssignmentDueStringToUtcIso(
 
   const pad = (n: number) => String(n).padStart(2, '0');
 
-  // Handle "today" or "tomorrow" relative to UTC+8 (Asia/Manila)
+  // Dynamically resolve target reference date components in Asia/Manila (or user timezone)
+  const baseDate = new Date();
+  const formatter = new Intl.DateTimeFormat('en-CA', {
+    timeZone: timezone || 'Asia/Manila',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  });
+  // en-CA formats as YYYY-MM-DD
+  const todayParts = formatter.format(baseDate).split('-');
+  const refYear = parseInt(todayParts[0], 10) || baseDate.getFullYear();
+  const refMonth = parseInt(todayParts[1], 10) || (baseDate.getMonth() + 1);
+  const refDay = parseInt(todayParts[2], 10) || baseDate.getDate();
+
+  // Handle "today"
   if (/\btoday\b/i.test(clean)) {
-    const d = new Date(`2026-09-05T${pad(hour)}:${pad(minute)}:${pad(second)}+08:00`);
-    return isNaN(d.getTime()) ? null : d.toISOString();
+    const localIso = `${refYear}-${pad(refMonth)}-${pad(refDay)}T${pad(hour)}:${pad(minute)}:${pad(second)}`;
+    return resolveDueDateToUtcIso(localIso, timezone, baseDate.toISOString());
   }
 
+  // Handle "tomorrow"
   if (/\btomorrow\b/i.test(clean)) {
-    const d = new Date(`2026-09-06T${pad(hour)}:${pad(minute)}:${pad(second)}+08:00`);
-    return isNaN(d.getTime()) ? null : d.toISOString();
+    const tomorrowDate = new Date(baseDate.getTime() + 86400000);
+    const tomParts = formatter.format(tomorrowDate).split('-');
+    const localIso = `${tomParts[0]}-${tomParts[1]}-${tomParts[2]}T${pad(hour)}:${pad(minute)}:${pad(second)}`;
+    return resolveDueDateToUtcIso(localIso, timezone, baseDate.toISOString());
   }
 
-  // Ensure year 2026 is present if missing: e.g. "Sep 7 1:00 AM" -> "Sep 7, 2026 1:00 AM"
+  // Ensure year is present if missing: e.g. "Sep 7 1:00 AM" -> "Sep 7, 2026 1:00 AM"
   if (!/\b20\d{2}\b/.test(clean)) {
     const monthDayMatch = clean.match(/([A-Za-z]+\s+\d{1,2})(.*)/);
     if (monthDayMatch) {
-      clean = `${monthDayMatch[1]}, 2026${monthDayMatch[2]}`;
+      clean = `${monthDayMatch[1]}, ${refYear}${monthDayMatch[2]}`;
     } else {
-      clean = `${clean}, 2026`;
+      clean = `${clean}, ${refYear}`;
     }
   }
 
@@ -548,8 +572,7 @@ function parseAssignmentDueStringToUtcIso(
     clean = `${clean} 11:59 PM`;
   }
 
-  // Parse dates explicitly relative to current year 2026:
-  // const parsedDate = new Date(`${rawDateString} GMT+0800`); // Asia/Manila (PST) offset
+  // Parse dates explicitly relative to current user timezone offset
   const withOffset = /GMT[+-]\d{4}|[+-]\d{2}:?\d{2}/i.test(clean)
     ? clean
     : `${clean} GMT+0800`;
@@ -569,11 +592,11 @@ function parseAssignmentDueStringToUtcIso(
   const monthRegex = /\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b/i;
   const monthMatch = clean.match(monthRegex);
   if (monthMatch) {
-    const monthNum = months[monthMatch[1].toLowerCase()] || 9;
+    const monthNum = months[monthMatch[1].toLowerCase()] || refMonth;
     const dayMatch = clean.match(/\b(\d{1,2})\b/);
-    const dayNum = dayMatch ? parseInt(dayMatch[1], 10) : 7;
+    const dayNum = dayMatch ? parseInt(dayMatch[1], 10) : refDay;
     const yearMatch = clean.match(/\b(20\d{2})\b/);
-    const yearNum = yearMatch ? parseInt(yearMatch[1], 10) : 2026;
+    const yearNum = yearMatch ? parseInt(yearMatch[1], 10) : refYear;
 
     const iso = `${yearNum}-${pad(monthNum)}-${pad(dayNum)}T${pad(hour)}:${pad(minute)}:${pad(second)}+08:00`;
     const d = new Date(iso);
@@ -627,9 +650,10 @@ async function resolveCourseForUser(
 
   // 2. Create clean course entry in DB if none matched
   try {
+    const cleanChannel = cleanCourseName(channelFallback || '') || null;
     const [newCourse] = await sql`
       INSERT INTO courses (user_id, code, name, channel_id)
-      VALUES (${userId}::uuid, ${cleanCode.slice(0, 50)}, ${cleanName}, ${channelFallback || null})
+      VALUES (${userId}::uuid, ${cleanCode.slice(0, 50)}, ${cleanName}, ${cleanChannel})
       RETURNING id, code, name, channel_id
     `;
     if (newCourse) {
@@ -735,7 +759,9 @@ export async function POST(req: NextRequest) {
         let dueDateIso = parseAssignmentDueStringToUtcIso(rawDue, userTimezone);
 
         if (!dueDateIso) {
-          dueDateIso = new Date('2026-09-07T23:59:59+08:00').toISOString();
+          // Dynamic fallback to 7 days from now at 23:59:59 UTC+8
+          const futureRef = new Date(Date.now() + 7 * 86400000);
+          dueDateIso = futureRef.toISOString();
         }
 
         // NOTE: Items in the Teams Upcoming view are verified upcoming deliverables and must NEVER be discarded as overdue.
@@ -747,17 +773,20 @@ export async function POST(req: NextRequest) {
           : extractCourseCode(cleanName);
         const courseId = await resolveCourseForUser(sql, userId, cleanName, cleanCode, userCourses);
 
-        // Deterministic canonical raw message hash:
-        // unique_hash = sha256(`${userId}_${courseCode}_${normalizedTitle}`)
-        const rawHash = computeCanonicalTaskHash(userId, cleanCode, title);
-
-        // Extract assignmentId (UUID from the card element)
-        const assignmentId = (
+        // Strict UUID extraction and verification for assignmentId
+        const rawAssignmentId = (
           item.assignmentId ||
           (item as any).assignment_id ||
           (item as any).id ||
           ''
-        ).trim() || null;
+        ).trim();
+        const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+        const assignmentId = UUID_REGEX.test(rawAssignmentId) ? rawAssignmentId : null;
+
+        // Deterministic raw message hash synchronized 1:1 with assignmentId if available
+        const rawHash = assignmentId
+          ? crypto.createHash('sha256').update(`assignment:${userId}:${assignmentId}`).digest('hex')
+          : computeCanonicalTaskHash(userId, cleanCode, title);
 
         const classId = (
           item.classId ||
@@ -827,6 +856,7 @@ export async function POST(req: NextRequest) {
               due_date = EXCLUDED.due_date,
               deep_link = EXCLUDED.deep_link,
               source_url = EXCLUDED.source_url,
+              raw_message_hash = EXCLUDED.raw_message_hash,
               description = COALESCE(EXCLUDED.description, tasks.description),
               updated_at = NOW()
             RETURNING (xmax = 0) AS is_insert, id, title, due_date, source_url, deep_link, assignment_id;

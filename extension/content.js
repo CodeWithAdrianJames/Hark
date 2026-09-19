@@ -1533,8 +1533,10 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
               clearInterval(interval);
               if (found) {
                 log('[Hark] Successfully resolved pending navigation target:', pending.assignmentId);
-                chrome.storage.local.remove(['pendingNavigationTarget']);
+              } else {
+                log('[Hark] Pending navigation target timed out after 10 attempts:', pending.assignmentId);
               }
+              chrome.storage.local.remove(['pendingNavigationTarget']);
             }
           }, 1200);
         }
@@ -1745,11 +1747,12 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
           (k) => k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance')
         );
 
+        const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
         let extractedTitle = stampedTitle || null;
         let extractedClassName = stampedClassName || null;
         let extractedDueDate = stampedDueDate || null;
         let extractedClassId = classId || null;
-        let extractedAssignmentId = assignmentId || null;
+        let extractedAssignmentId = UUID_REGEX.test(assignmentId) ? assignmentId : null;
 
         if (fiberKey) {
           let cur = card[fiberKey];
@@ -1780,8 +1783,10 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
                   candidate.classId || candidate.courseId || candidate.classDetails?.id || null;
               }
               if (!extractedAssignmentId) {
-                extractedAssignmentId =
-                  candidate.id || card.id || candidate.assignmentId || null;
+                const candidateId = String(candidate.id || candidate.assignmentId || card.id || '').trim();
+                if (UUID_REGEX.test(candidateId)) {
+                  extractedAssignmentId = candidateId;
+                }
               }
             }
             cur = cur.return;
@@ -2138,17 +2143,19 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
       // Deep link resolution targeting specific assignment view
       let deepLink = fiberDetails?.deepLink || extractEduCardDeepLink(card);
       if (!deepLink || deepLink.endsWith('/classes/all/list') || deepLink.endsWith('/classes/all/list/')) {
-        deepLink = 'https://teams.microsoft.com/_#/assignments/';
+        deepLink = 'https://teams.microsoft.com/v2/';
       }
 
       // Scraper ID Capture: Extract UUID from fiber or card element
-      const assignmentId =
+      const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      const rawCandidateId =
         fiberDetails?.assignmentId ||
         card.getAttribute?.('data-hark-assignment-id') ||
         card.getAttribute?.('data-assignment-id') ||
         card.getAttribute?.('data-item-id') ||
         card.id ||
-        null;
+        '';
+      const assignmentId = UUID_REGEX.test(rawCandidateId) ? rawCandidateId : null;
 
       const classId = fiberDetails?.classId || card.getAttribute?.('data-hark-class-id') || null;
 
@@ -2283,15 +2290,18 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
             }
 
             if (!deepLink || deepLink.endsWith('/classes/all/list') || deepLink.endsWith('/classes/all/list/')) {
-              deepLink = 'https://teams.microsoft.com/_#/assignments/';
+              deepLink = 'https://teams.microsoft.com/v2/';
             }
 
-            const assignmentId =
+            const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+            const rawCandidateId =
               fiberDetails?.assignmentId ||
-              cardTarget?.id ||
+              cardTarget?.getAttribute?.('data-hark-assignment-id') ||
               cardTarget?.getAttribute?.('data-assignment-id') ||
               cardTarget?.getAttribute?.('data-item-id') ||
-              null;
+              cardTarget?.id ||
+              '';
+            const assignmentId = UUID_REGEX.test(rawCandidateId) ? rawCandidateId : null;
 
             const classId = fiberDetails?.classId || null;
 
@@ -2453,13 +2463,15 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
         }
       }
 
-      const assignmentId =
+      const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      const rawAssignId =
         fiberDetails?.assignmentId ||
         el.getAttribute?.('data-hark-assignment-id') ||
         el.getAttribute?.('data-assignment-id') ||
         el.getAttribute?.('data-item-id') ||
         el.id ||
-        null;
+        '';
+      const assignmentId = UUID_REGEX.test(rawAssignId) ? rawAssignId : null;
 
       const classId = fiberDetails?.classId || el.getAttribute?.('data-hark-class-id') || null;
 

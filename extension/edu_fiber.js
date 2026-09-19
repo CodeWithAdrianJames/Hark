@@ -21,9 +21,10 @@
         const p = cur.memoizedProps;
         if (p) {
           const candidate = p.assignment || p.item || p.cardData || p;
-          if (candidate && (candidate.classId || candidate.courseId || candidate.id || candidate.displayName || candidate.title)) {
+            const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
             const classId = candidate.classId || candidate.courseId || candidate.classDetails?.id;
-            const assignmentId = candidate.id || cardEl.id || candidate.assignmentId;
+            const rawAssignId = String(candidate.id || candidate.assignmentId || cardEl.id || '').trim();
+            const assignmentId = UUID_REGEX.test(rawAssignId) ? rawAssignId : null;
             const fullTitle = candidate.displayName || candidate.title || candidate.name || candidate.assignmentTitle;
             const fullClassName = candidate.className || candidate.classDetails?.displayName || candidate.courseName;
             const dueDate = candidate.dueDateTime || candidate.dueDate;
