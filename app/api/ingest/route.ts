@@ -89,6 +89,16 @@ function cleanCourseName(raw: string | null | undefined): string {
   if (!raw || typeof raw !== 'string') return '';
   let text = raw.trim();
 
+  // Reject deadline / time expressions immediately
+  if (
+    /^due\b/i.test(text) ||
+    /\bdue\s+(?:at|by|on|date)\b/i.test(text) ||
+    /^\d{1,2}:\d{2}\s*(?:am|pm)?$/i.test(text) ||
+    /^at\s+\d{1,2}:\d{2}/i.test(text)
+  ) {
+    return '';
+  }
+
   // Strip notification badges: (1), (99+), etc.
   text = text.replace(/^\(\d+\+?\)\s*/, '');
   text = text.replace(/[\u{1F514}\u{25CF}\u{25CB}\u{2022}]/gu, '');
@@ -108,7 +118,10 @@ function cleanCourseName(raw: string | null | undefined): string {
         lower !== 'general' &&
         lower !== 'teams' &&
         lower !== 'chat' &&
-        lower !== 'conversations'
+        lower !== 'conversations' &&
+        !lower.startsWith('due') &&
+        !lower.includes('due at') &&
+        !/^\d{1,2}:\d{2}/.test(lower)
       );
     });
     if (filtered.length > 0) text = filtered[0];
@@ -118,6 +131,9 @@ function cleanCourseName(raw: string | null | undefined): string {
   const lowerFinal = text.toLowerCase().trim();
   if (
     !lowerFinal ||
+    lowerFinal.startsWith('due') ||
+    lowerFinal.includes('due at') ||
+    /^\d{1,2}:\d{2}/.test(lowerFinal) ||
     lowerFinal === 'teams' ||
     lowerFinal === 'general' ||
     lowerFinal === 'microsoft teams' ||
@@ -796,7 +812,12 @@ export async function POST(req: NextRequest) {
           continue;
         }
 
-        const rawDue = (item.rawDueString || '').trim();
+        const rawDue = (
+          item.rawDueString ||
+          (item as any).dueDateTime ||
+          (item as any).dueDate ||
+          ''
+        ).trim();
         let dueDateIso = parseAssignmentDueStringToUtcIso(rawDue, userTimezone);
 
         if (!dueDateIso) {
@@ -807,7 +828,7 @@ export async function POST(req: NextRequest) {
 
         // Ground-truth course resolution
         const cleanName = cleanCourseName(item.courseName) || 'General';
-        const cleanCode = item.courseCode
+        const cleanCode = item.courseCode && !/^due\b/i.test(item.courseCode)
           ? normalizeCourseCode(item.courseCode)
           : extractCourseCode(cleanName);
         const courseId = await resolveCourseForUser(sql, userId, cleanName, cleanCode, userCourses);
@@ -835,13 +856,20 @@ export async function POST(req: NextRequest) {
         ).trim() || null;
 
         // Resolve deep_link
-        const deepLink = (
+        let deepLink = (
           item.deepLink ||
           (item as any).directPortalUrl ||
           (item as any).teamsAppDeepLink ||
           (item as any).source_url ||
-          'https://teams.microsoft.com/v2/'
+          ''
         ).trim();
+
+        if (classId && assignmentId && (!deepLink || deepLink.endsWith('/classes/all/list') || deepLink.endsWith('/classes/all/list/'))) {
+          deepLink = `https://assignments.edu.cloud.microsoft/classes/${classId}/assignments/${assignmentId}`;
+        }
+        if (!deepLink) {
+          deepLink = 'https://teams.microsoft.com/v2/';
+        }
 
         const description = item.description?.trim() || null;
 
