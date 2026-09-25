@@ -41,7 +41,7 @@ async function testPostgresUpsert() {
       ${testHash},
       'pending'
     )
-    ON CONFLICT (raw_message_hash)
+    ON CONFLICT (user_id, raw_message_hash)
     DO UPDATE SET
       title = EXCLUDED.title,
       due_date = EXCLUDED.due_date,
@@ -81,7 +81,7 @@ async function testPostgresUpsert() {
       ${testHash},
       'pending'
     )
-    ON CONFLICT (raw_message_hash)
+    ON CONFLICT (user_id, raw_message_hash)
     DO UPDATE SET
       title = EXCLUDED.title,
       due_date = EXCLUDED.due_date,

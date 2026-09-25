@@ -21,6 +21,31 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
     'color: #f87171; font-weight: bold; background: #0f172a; padding: 2px 6px; border-radius: 3px;';
 
   const isTopWindow = window.self === window.top;
+  const isTeamsDomain =
+    typeof window !== 'undefined' &&
+    (window.location.hostname.includes('teams.microsoft.com') ||
+      window.location.hostname.includes('assignments.onenote.com') ||
+      window.location.hostname.includes('assignments.microsoft.com') ||
+      window.location.hostname.includes('assignments.edu.cloud.microsoft'));
+
+  // If running on a Hark web dashboard tab, listen for HARK_SYNC_COMPLETED from service worker
+  if (!isTeamsDomain) {
+    if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
+      chrome.runtime.onMessage.addListener((message) => {
+        if (message && message.type === 'HARK_SYNC_COMPLETED') {
+          window.postMessage(
+            {
+              type: 'HARK_SYNC_COMPLETED',
+              source: 'hark-extension',
+              ...message,
+            },
+            window.location.origin
+          );
+        }
+      });
+    }
+    return;
+  }
   const isEduAssignmentsHost =
     typeof window !== 'undefined' &&
     window.location.hostname.includes('assignments.edu.cloud.microsoft');
@@ -114,9 +139,10 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
    */
   async function loadSettingsAndCache() {
     return new Promise((resolve) => {
-      chrome.storage.sync.get(['apiUrl', 'userId', 'isAutoIngestEnabled', 'syncEnabled'], (syncData) => {
+      chrome.storage.sync.get(['apiUrl', 'userId', 'apiKey', 'isAutoIngestEnabled', 'syncEnabled'], (syncData) => {
         config.apiUrl = (syncData.apiUrl || 'http://localhost:3000/api/ingest').trim();
         config.userId = (syncData.userId || '').trim();
+        config.apiKey = (syncData.apiKey || '').trim();
 
         if (syncData.isAutoIngestEnabled !== undefined) {
           config.isAutoIngestEnabled = Boolean(syncData.isAutoIngestEnabled);
@@ -721,7 +747,7 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
   // Layer 1: Network Request Interception Bridge
   // ==========================================
   window.addEventListener('message', (event) => {
-    if (event.source !== window) return;
+    if (event.source !== window || event.origin !== window.location.origin) return;
     if (!event.data || event.data.type !== 'HARK_CAPTURED_MESSAGES') return;
 
     const { messages, endpoint } = event.data;

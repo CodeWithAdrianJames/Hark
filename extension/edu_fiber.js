@@ -85,9 +85,15 @@
   // Initial scan
   syncAllCards();
 
-  // Observe DOM for newly rendered or virtualized assignment cards
+  // Observe DOM for newly rendered or virtualized assignment cards (debounced by 1500ms for PRF-01)
+  let debounceTimer = null;
   const observer = new MutationObserver(() => {
-    syncAllCards();
+    if (debounceTimer) {
+      clearTimeout(debounceTimer);
+    }
+    debounceTimer = setTimeout(() => {
+      syncAllCards();
+    }, 1500);
   });
 
   if (document.body) {

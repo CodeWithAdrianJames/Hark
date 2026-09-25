@@ -1,6 +1,100 @@
 import crypto from 'crypto';
 
 /**
+ * ---------------------------------------------------------------------------
+ * Database Record Contracts & TypeScript Schema Definitions
+ * Mirrors PostgreSQL Tables, Foreign Keys, Composite Indexes & Constraints
+ * ---------------------------------------------------------------------------
+ */
+
+export type TaskStatus = 'pending' | 'in_progress' | 'completed';
+export type TaskSourceType = 'official_assignment' | 'chat_announcement';
+
+export interface UserRecord {
+  id: string; // UUID primary key
+  email: string;
+  created_at: string;
+}
+
+export interface CourseRecord {
+  id: string; // UUID primary key
+  user_id: string; // Foreign key -> users(id) ON DELETE CASCADE
+  code: string; // Normalized course code (e.g., CSIT321G1, IT317)
+  name: string; // Course name or title
+  channel_id: string | null; // Associated Teams channel/class identifier
+  created_at: string;
+}
+
+export interface TaskRecord {
+  id: string; // UUID primary key
+  user_id: string; // Foreign key -> users(id) ON DELETE CASCADE
+  course_id: string | null; // Foreign key -> courses(id) ON DELETE CASCADE
+  assignment_id: string | null; // Microsoft Teams official assignment UUID
+  class_id: string | null; // Microsoft Teams class / channel UUID
+  title: string;
+  description: string | null;
+  due_date: string; // timestamptz
+  source_type: TaskSourceType;
+  source_url: string | null;
+  deep_link: string | null;
+  raw_message_hash: string; // SHA-256 canonical message/assignment hash
+  status: TaskStatus;
+  is_completed?: boolean;
+  urgency?: string;
+  created_at: string;
+  updated_at?: string;
+}
+
+export interface TaskWithCourse extends TaskRecord {
+  course_code?: string;
+  course_name?: string;
+  completed?: boolean;
+}
+
+/**
+ * Composite Database Constraints & Index Specifications
+ * Documents verified PostgreSQL catalog invariants established in:
+ * - migrations/0001_init_schema.sql
+ * - migrations/0002_fix_constraints_and_indexes.sql
+ */
+export const DATABASE_CONSTRAINTS = {
+  tasks: {
+    primaryKey: 'id',
+    foreignKeys: {
+      user_id: 'users(id) ON DELETE CASCADE',
+      course_id: 'courses(id) ON DELETE CASCADE',
+    },
+    uniqueConstraints: {
+      // DAT-02: Tenant-scoped assignment deduplication
+      tasks_user_id_raw_message_hash_idx: ['user_id', 'raw_message_hash'],
+      // Official Microsoft Teams assignment deduplication per student
+      tasks_user_assignment_unique: ['user_id', 'assignment_id'],
+    },
+    compositeIndexes: {
+      // PRF-03: Dashboard query sorting and pagination index
+      idx_tasks_user_due_created: ['user_id', 'due_date ASC', 'created_at DESC'],
+      idx_tasks_user_due_date: ['user_id', 'due_date ASC'],
+      idx_tasks_user_status: ['user_id', 'status'],
+      idx_tasks_course_id: ['course_id'],
+    },
+  },
+  courses: {
+    primaryKey: 'id',
+    foreignKeys: {
+      user_id: 'users(id) ON DELETE CASCADE',
+    },
+    uniqueConstraints: {
+      // ARC-04: Atomic course resolution & duplicate prevention per student
+      courses_user_id_code_idx: ['user_id', 'code'],
+    },
+    indexes: {
+      idx_courses_user_id: ['user_id'],
+      idx_courses_channel_id: ['channel_id'],
+    },
+  },
+} as const;
+
+/**
  * Normalizes course codes into a clean uppercase string without brackets.
  * Examples:
  * - "CSIT321G1 - 1stSem AY26-27" -> "CSIT321G1"

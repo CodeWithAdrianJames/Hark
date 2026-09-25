@@ -34,7 +34,7 @@ export async function GET(req: NextRequest) {
   try {
     const sql = getDb();
 
-    // Query tasks joined with course details
+    // Query tasks joined with course details using composite ordering index (PRF-03)
     const tasks = await sql`
       SELECT 
         t.id,
@@ -92,17 +92,19 @@ export async function GET(req: NextRequest) {
 /**
  * PATCH /api/tasks
  * Updates the status or completion state of an existing task.
- * Accepts: { id, status }, { taskId, completed }, or { id, completed }
+ * Accepts: { id, status, userId }, { taskId, completed, userId }, or { id, completed, userId }
+ * Strictly scopes mutation to (id, user_id) to eliminate IDOR vulnerabilities (SEC-03).
  */
 export async function PATCH(req: NextRequest) {
   try {
     const body = await req.json();
     const taskId = body.taskId || body.id;
+    const userId = body.userId || body.user_id;
     const { status, completed } = body;
 
-    if (!taskId) {
+    if (!taskId || !userId) {
       return NextResponse.json(
-        { error: 'Invalid payload: "id" or "taskId" is required.' },
+        { error: 'Invalid payload: Both "taskId" (or "id") and "userId" are required.' },
         { status: 400, headers: corsHeaders }
       );
     }
@@ -119,6 +121,7 @@ export async function PATCH(req: NextRequest) {
           is_completed = ${isComp},
           status = ${newStatus}
         WHERE id = ${taskId}::uuid
+          AND user_id = ${userId}::uuid
         RETURNING *;
       `;
     } else if (status && ['pending', 'in_progress', 'completed'].includes(status)) {
@@ -129,6 +132,7 @@ export async function PATCH(req: NextRequest) {
           status = ${status},
           is_completed = ${isComp}
         WHERE id = ${taskId}::uuid
+          AND user_id = ${userId}::uuid
         RETURNING *;
       `;
     } else {
@@ -140,7 +144,7 @@ export async function PATCH(req: NextRequest) {
 
     if (!updatedTask) {
       return NextResponse.json(
-        { error: 'Task not found with the provided ID.' },
+        { error: 'Task not found or not owned by user.' },
         { status: 404, headers: corsHeaders }
       );
     }

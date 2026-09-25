@@ -212,7 +212,7 @@
         endpoint,
         messages,
       },
-      '*'
+      window.location.origin
     );
   }
 

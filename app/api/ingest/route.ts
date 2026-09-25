@@ -7,30 +7,55 @@ import { computeCanonicalTaskHash, normalizeCourseCode } from '@/lib/schema';
 
 export const dynamic = 'force-dynamic';
 
-// CORS Headers for browser extensions and cross-origin requests
-const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'POST, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-};
+// CORS Configuration with strict origin allowlist
+const ALLOWED_ORIGIN_PATTERNS = [
+  /^http:\/\/localhost:\d+$/,
+  /^http:\/\/127\.0\.0\.1:\d+$/,
+  /^https:\/\/localhost:\d+$/,
+  /^chrome-extension:\/\/[a-z]{32}$/,
+  /^https:\/\/[a-z0-9-]+\.vercel\.app$/,
+];
+
+export function getCorsHeaders(req?: NextRequest): Record<string, string> {
+  const origin = req?.headers.get('origin');
+  let matchedOrigin = 'http://localhost:3000';
+
+  if (origin) {
+    const isAllowed =
+      ALLOWED_ORIGIN_PATTERNS.some((pattern) => pattern.test(origin)) ||
+      (process.env.NEXT_PUBLIC_APP_URL && origin === process.env.NEXT_PUBLIC_APP_URL.replace(/\/$/, '')) ||
+      (process.env.PRODUCTION_DOMAIN && origin === process.env.PRODUCTION_DOMAIN.replace(/\/$/, ''));
+
+    if (isAllowed) {
+      matchedOrigin = origin;
+    }
+  }
+
+  return {
+    'Access-Control-Allow-Origin': matchedOrigin,
+    'Access-Control-Allow-Methods': 'POST, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    'Vary': 'Origin',
+  };
+}
 
 /**
  * Preflight OPTIONS handler
  */
-export async function OPTIONS() {
+export async function OPTIONS(req: NextRequest) {
   return new NextResponse(null, {
     status: 204,
-    headers: corsHeaders,
+    headers: getCorsHeaders(req),
   });
 }
 
 /**
  * Helper to return JSON responses with standard CORS headers
  */
-function jsonResponse(data: unknown, status = 200) {
+function jsonResponse(data: unknown, status = 200, req?: NextRequest) {
   return NextResponse.json(data, {
     status,
-    headers: corsHeaders,
+    headers: getCorsHeaders(req),
   });
 }
 
@@ -654,6 +679,7 @@ async function resolveCourseForUser(
     const [newCourse] = await sql`
       INSERT INTO courses (user_id, code, name, channel_id)
       VALUES (${userId}::uuid, ${cleanCode.slice(0, 50)}, ${cleanName}, ${cleanChannel})
+      ON CONFLICT (user_id, code) DO UPDATE SET name = EXCLUDED.name
       RETURNING id, code, name, channel_id
     `;
     if (newCourse) {
@@ -674,6 +700,18 @@ async function resolveCourseForUser(
 
 export async function POST(req: NextRequest) {
   try {
+    // SEC-02: Enforce Authorization via Bearer <INGEST_API_KEY>
+    const authHeader = req.headers.get('authorization') || '';
+    const ingestApiKey = process.env.INGEST_API_KEY?.trim();
+
+    if (!ingestApiKey || !authHeader.startsWith('Bearer ') || authHeader.slice(7).trim() !== ingestApiKey) {
+      return jsonResponse(
+        { error: 'Unauthorized: Missing or invalid Authorization Bearer token.' },
+        401,
+        req
+      );
+    }
+
     const body = (await req.json()) as any;
     const userId = body.userId;
     const userTimezone = (body.timezone || '').trim() || 'Asia/Manila';
@@ -682,7 +720,8 @@ export async function POST(req: NextRequest) {
     if (!userId || typeof userId !== 'string') {
       return jsonResponse(
         { error: 'Missing or invalid "userId" field in request payload.' },
-        400
+        400,
+        req
       );
     }
 
@@ -721,40 +760,42 @@ export async function POST(req: NextRequest) {
           channel_id: (c.channel_id as string) || null,
         }));
 
-      // Temporary auto-clean or reset query right before inserting:
-      // If query param ?reset=true is passed, or wipe existing tasks where deep_link LIKE '%/classes/all/list'
-      const urlObj = new URL(req.url);
-      const isReset = urlObj.searchParams.get('reset') === 'true';
-
-      if (isReset) {
-        await sql`
-          DELETE FROM tasks
-          WHERE user_id = ${userId}::uuid;
-        `;
-        console.log(`[Fast-Path] ?reset=true: Reset all tasks for user ${userId}`);
-      } else {
-        await sql`
-          DELETE FROM tasks
-          WHERE user_id = ${userId}::uuid
-            AND (
-              deep_link LIKE '%/classes/all/list%'
-              OR source_url LIKE '%/classes/all/list%'
-              OR deep_link LIKE '%/assignments?context=%'
-              OR source_url LIKE '%/assignments?context=%'
-            );
-        `;
+      interface PreparedTask {
+        userId: string;
+        assignmentId: string | null;
+        rawHash: string;
+        title: string;
+        courseName: string;
+        courseId: string | null;
+        classId: string | null;
+        dueDateIso: string;
+        deepLink: string;
+        sourceUrl: string;
+        description: string | null;
+        sourceType: string;
+        urgency: string;
+        status: string;
+        isCompleted: boolean;
       }
 
-      let insertedCount = 0;
-      let updatedCount = 0;
-      const syncedTasks: Array<Record<string, unknown>> = [];
+      // In-memory deduplication by assignment_id (or raw_message_hash for fallback items)
+      // to prevent PostgreSQL "ON CONFLICT DO UPDATE command cannot affect row a second time" errors.
+      const tasksWithIdMap = new Map<string, PreparedTask>();
+      const tasksWithoutIdMap = new Map<string, PreparedTask>();
+      let skippedCount = 0;
 
       for (const item of assignments) {
         if (!item || !item.title) {
+          skippedCount++;
           continue;
         }
 
         const title = item.title.trim();
+        if (title.length <= 2) {
+          skippedCount++;
+          continue;
+        }
+
         const rawDue = (item.rawDueString || '').trim();
         let dueDateIso = parseAssignmentDueStringToUtcIso(rawDue, userTimezone);
 
@@ -763,8 +804,6 @@ export async function POST(req: NextRequest) {
           const futureRef = new Date(Date.now() + 7 * 86400000);
           dueDateIso = futureRef.toISOString();
         }
-
-        // NOTE: Items in the Teams Upcoming view are verified upcoming deliverables and must NEVER be discarded as overdue.
 
         // Ground-truth course resolution
         const cleanName = cleanCourseName(item.courseName) || 'General';
@@ -806,181 +845,365 @@ export async function POST(req: NextRequest) {
 
         const description = item.description?.trim() || null;
 
-        let result;
+        const prepared: PreparedTask = {
+          userId,
+          assignmentId,
+          rawHash,
+          title,
+          courseName: cleanName,
+          courseId,
+          classId,
+          dueDateIso,
+          deepLink,
+          sourceUrl: deepLink,
+          description,
+          sourceType: 'official_assignment',
+          urgency: 'upcoming',
+          status: 'pending',
+          isCompleted: false,
+        };
+
         if (assignmentId) {
-          result = await sql`
-            INSERT INTO tasks (
-              user_id,
-              assignment_id,
-              raw_message_hash,
-              title,
-              course_name,
-              course_id,
-              class_id,
-              due_date,
-              deep_link,
-              source_url,
-              description,
-              source_type,
-              urgency,
-              status,
-              is_completed,
-              created_at,
-              updated_at
-            )
-            VALUES (
-              ${userId}::uuid,
-              ${assignmentId},
-              ${rawHash},
-              ${title},
-              ${cleanName},
-              ${courseId ? courseId : null},
-              ${classId},
-              ${dueDateIso}::timestamptz,
-              ${deepLink},
-              ${deepLink},
-              ${description},
-              'official_assignment',
-              'upcoming',
-              'pending',
-              false,
-              NOW(),
-              NOW()
-            )
-            ON CONFLICT (user_id, assignment_id)
-            DO UPDATE SET
-              title = EXCLUDED.title,
-              course_name = EXCLUDED.course_name,
-              course_id = COALESCE(EXCLUDED.course_id, tasks.course_id),
-              class_id = COALESCE(EXCLUDED.class_id, tasks.class_id),
-              due_date = EXCLUDED.due_date,
-              deep_link = EXCLUDED.deep_link,
-              source_url = EXCLUDED.source_url,
-              raw_message_hash = EXCLUDED.raw_message_hash,
-              description = COALESCE(EXCLUDED.description, tasks.description),
-              updated_at = NOW()
-            RETURNING (xmax = 0) AS is_insert, id, title, due_date, source_url, deep_link, assignment_id;
-          `;
+          tasksWithIdMap.set(assignmentId, prepared);
         } else {
-          result = await sql`
-            INSERT INTO tasks (
-              user_id,
-              course_id,
-              course_name,
-              class_id,
-              title,
-              description,
-              due_date,
-              source_type,
-              source_url,
-              deep_link,
-              urgency,
-              raw_message_hash,
-              status,
-              is_completed,
-              created_at,
-              updated_at
+          tasksWithoutIdMap.set(rawHash, prepared);
+        }
+      }
+
+      const tasksWithId = Array.from(tasksWithIdMap.values());
+      const tasksWithoutId = Array.from(tasksWithoutIdMap.values());
+
+      let insertedCount = 0;
+      let updatedCount = 0;
+      let cleanTasks: Array<Record<string, unknown>> = [];
+
+      if (tasksWithId.length > 0 || tasksWithoutId.length > 0) {
+        // Wrap entire ingestion sequence inside an atomic Neon database transaction (REL-02)
+        const txnResults = await sql.transaction((tx) => {
+          const queries: any[] = [];
+
+          // 1. Parameterized multi-row batch upsert for items with assignmentId (PRF-02, DAT-01)
+          // Preserves is_completed and manual status overrides
+          if (tasksWithId.length > 0) {
+            queries.push(tx`
+              INSERT INTO tasks (
+                user_id,
+                assignment_id,
+                raw_message_hash,
+                title,
+                course_name,
+                course_id,
+                class_id,
+                due_date,
+                deep_link,
+                source_url,
+                description,
+                source_type,
+                urgency,
+                status,
+                is_completed,
+                created_at,
+                updated_at
+              )
+              SELECT 
+                v.user_id,
+                v.assignment_id,
+                v.raw_message_hash,
+                v.title,
+                v.course_name,
+                v.course_id,
+                v.class_id,
+                v.due_date,
+                v.deep_link,
+                v.source_url,
+                v.description,
+                v.source_type,
+                v.urgency,
+                v.status,
+                v.is_completed,
+                NOW(),
+                NOW()
+              FROM unnest(
+                ${tasksWithId.map((t) => t.userId)}::uuid[],
+                ${tasksWithId.map((t) => t.assignmentId!)}::text[],
+                ${tasksWithId.map((t) => t.rawHash)}::text[],
+                ${tasksWithId.map((t) => t.title)}::text[],
+                ${tasksWithId.map((t) => t.courseName)}::text[],
+                ${tasksWithId.map((t) => t.courseId)}::uuid[],
+                ${tasksWithId.map((t) => t.classId)}::text[],
+                ${tasksWithId.map((t) => t.dueDateIso)}::timestamptz[],
+                ${tasksWithId.map((t) => t.deepLink)}::text[],
+                ${tasksWithId.map((t) => t.sourceUrl)}::text[],
+                ${tasksWithId.map((t) => t.description)}::text[],
+                ${tasksWithId.map((t) => t.sourceType)}::text[],
+                ${tasksWithId.map((t) => t.urgency)}::text[],
+                ${tasksWithId.map((t) => t.status)}::text[],
+                ${tasksWithId.map((t) => t.isCompleted)}::boolean[]
+              ) AS v(
+                user_id,
+                assignment_id,
+                raw_message_hash,
+                title,
+                course_name,
+                course_id,
+                class_id,
+                due_date,
+                deep_link,
+                source_url,
+                description,
+                source_type,
+                urgency,
+                status,
+                is_completed
+              )
+              ON CONFLICT (user_id, assignment_id)
+              DO UPDATE SET
+                title = EXCLUDED.title,
+                due_date = EXCLUDED.due_date,
+                course_name = EXCLUDED.course_name,
+                course_id = COALESCE(EXCLUDED.course_id, tasks.course_id),
+                class_id = COALESCE(EXCLUDED.class_id, tasks.class_id),
+                deep_link = EXCLUDED.deep_link,
+                source_url = EXCLUDED.source_url,
+                raw_message_hash = EXCLUDED.raw_message_hash,
+                description = COALESCE(EXCLUDED.description, tasks.description),
+                updated_at = NOW()
+              RETURNING (xmax = 0) AS is_insert, id, title, due_date, source_url, deep_link, assignment_id;
+            `);
+          }
+
+          // 2. Parameterized multi-row batch upsert for items without assignmentId
+          if (tasksWithoutId.length > 0) {
+            queries.push(tx`
+              INSERT INTO tasks (
+                user_id,
+                course_id,
+                course_name,
+                class_id,
+                title,
+                description,
+                due_date,
+                source_type,
+                source_url,
+                deep_link,
+                urgency,
+                raw_message_hash,
+                status,
+                is_completed,
+                created_at,
+                updated_at
+              )
+              SELECT 
+                v.user_id,
+                v.course_id,
+                v.course_name,
+                v.class_id,
+                v.title,
+                v.description,
+                v.due_date,
+                v.source_type,
+                v.source_url,
+                v.deep_link,
+                v.urgency,
+                v.raw_message_hash,
+                v.status,
+                v.is_completed,
+                NOW(),
+                NOW()
+              FROM unnest(
+                ${tasksWithoutId.map((t) => t.userId)}::uuid[],
+                ${tasksWithoutId.map((t) => t.courseId)}::uuid[],
+                ${tasksWithoutId.map((t) => t.courseName)}::text[],
+                ${tasksWithoutId.map((t) => t.classId)}::text[],
+                ${tasksWithoutId.map((t) => t.title)}::text[],
+                ${tasksWithoutId.map((t) => t.description)}::text[],
+                ${tasksWithoutId.map((t) => t.dueDateIso)}::timestamptz[],
+                ${tasksWithoutId.map((t) => t.sourceType)}::text[],
+                ${tasksWithoutId.map((t) => t.sourceUrl)}::text[],
+                ${tasksWithoutId.map((t) => t.deepLink)}::text[],
+                ${tasksWithoutId.map((t) => t.urgency)}::text[],
+                ${tasksWithoutId.map((t) => t.rawHash)}::text[],
+                ${tasksWithoutId.map((t) => t.status)}::text[],
+                ${tasksWithoutId.map((t) => t.isCompleted)}::boolean[]
+              ) AS v(
+                user_id,
+                course_id,
+                course_name,
+                class_id,
+                title,
+                description,
+                due_date,
+                source_type,
+                source_url,
+                deep_link,
+                urgency,
+                raw_message_hash,
+                status,
+                is_completed
+              )
+              ON CONFLICT (user_id, raw_message_hash)
+              DO UPDATE SET
+                deep_link = EXCLUDED.deep_link,
+                title = EXCLUDED.title,
+                course_name = EXCLUDED.course_name,
+                course_id = COALESCE(EXCLUDED.course_id, tasks.course_id),
+                class_id = COALESCE(EXCLUDED.class_id, tasks.class_id),
+                due_date = EXCLUDED.due_date,
+                description = COALESCE(EXCLUDED.description, tasks.description),
+                source_url = EXCLUDED.deep_link,
+                updated_at = NOW()
+              RETURNING (xmax = 0) AS is_insert, id, title, due_date, source_url, deep_link, assignment_id;
+            `);
+          }
+
+          // 3. State-transfer CTE: preserve is_completed = true and status from older record to newer record before deletion (DAT-01)
+          queries.push(tx`
+            WITH to_update AS (
+              SELECT b.id AS target_id, a.is_completed, a.status
+              FROM tasks a
+              JOIN tasks b ON a.user_id = b.user_id 
+                AND a.assignment_id = b.assignment_id 
+                AND a.id < b.id
+              WHERE a.is_completed = true AND b.is_completed = false
             )
-            VALUES (
-              ${userId}::uuid,
-              ${courseId ? courseId : null},
-              ${cleanName},
-              ${classId},
-              ${title},
-              ${description},
-              ${dueDateIso}::timestamptz,
-              'official_assignment',
-              ${deepLink},
-              ${deepLink},
-              'upcoming',
-              ${rawHash},
-              'pending',
-              false,
-              NOW(),
-              NOW()
+            UPDATE tasks t
+            SET is_completed = u.is_completed, status = u.status
+            FROM to_update u
+            WHERE t.id = u.target_id;
+          `);
+
+          // 4. Delete duplicate tasks by assignment_id
+          queries.push(tx`
+            DELETE FROM tasks a USING tasks b
+            WHERE a.id < b.id 
+              AND a.user_id = ${userId}::uuid
+              AND b.user_id = ${userId}::uuid
+              AND a.assignment_id IS NOT NULL 
+              AND b.assignment_id IS NOT NULL 
+              AND a.assignment_id = b.assignment_id;
+          `);
+
+          // 5. State-transfer CTE: preserve is_completed and status for title matches (unassociated tasks merged into native assignment)
+          queries.push(tx`
+            WITH to_update_by_title AS (
+              SELECT b.id AS target_id, a.is_completed, a.status
+              FROM tasks a
+              JOIN tasks b ON a.user_id = b.user_id
+                AND a.title = b.title
+                AND a.assignment_id IS NULL
+                AND b.assignment_id IS NOT NULL
+              WHERE a.is_completed = true AND b.is_completed = false
             )
-            ON CONFLICT (user_id, raw_message_hash)
-            DO UPDATE SET
-              deep_link = EXCLUDED.deep_link,
-              title = EXCLUDED.title,
-              course_name = EXCLUDED.course_name,
-              course_id = COALESCE(EXCLUDED.course_id, tasks.course_id),
-              class_id = COALESCE(EXCLUDED.class_id, tasks.class_id),
-              due_date = EXCLUDED.due_date,
-              description = COALESCE(EXCLUDED.description, tasks.description),
-              source_url = EXCLUDED.deep_link,
-              updated_at = NOW()
-            RETURNING (xmax = 0) AS is_insert, id, title, due_date, source_url, deep_link, assignment_id;
-          `;
+            UPDATE tasks t
+            SET is_completed = u.is_completed, status = u.status
+            FROM to_update_by_title u
+            WHERE t.id = u.target_id;
+          `);
+
+          // 6. Delete unassociated title duplicates
+          queries.push(tx`
+            DELETE FROM tasks a USING tasks b
+            WHERE a.user_id = ${userId}::uuid
+              AND b.user_id = ${userId}::uuid
+              AND a.title = b.title
+              AND a.assignment_id IS NULL
+              AND b.assignment_id IS NOT NULL;
+          `);
+
+          // 7. Delete phantom noise titles
+          queries.push(tx`
+            DELETE FROM tasks
+            WHERE user_id = ${userId}::uuid
+              AND LENGTH(TRIM(title)) <= 2;
+          `);
+
+          // 8. Query active user tasks atomically inside the transaction (PRF-03, REL-02)
+          queries.push(tx`
+            SELECT 
+              t.id,
+              t.user_id,
+              t.course_id,
+              t.assignment_id,
+              t.title,
+              t.description,
+              t.due_date,
+              t.source_type,
+              t.source_url,
+              COALESCE(t.deep_link, t.source_url) AS deep_link,
+              t.raw_message_hash,
+              t.status,
+              COALESCE(t.is_completed, t.status = 'completed') AS is_completed,
+              COALESCE(t.is_completed, t.status = 'completed') AS completed,
+              t.created_at,
+              c.code AS course_code,
+              c.name AS course_name,
+              COALESCE(t.class_id, c.channel_id) AS class_id
+            FROM tasks t
+            LEFT JOIN courses c ON t.course_id = c.id
+            WHERE t.user_id = ${userId}::uuid
+            ORDER BY t.due_date ASC, t.created_at DESC;
+          `);
+
+          return queries;
+        });
+
+        let queryIdx = 0;
+        if (tasksWithId.length > 0) {
+          const rows = (txnResults[queryIdx++] as Array<any>) || [];
+          for (const row of rows) {
+            if (row.is_insert) {
+              insertedCount++;
+            } else {
+              updatedCount++;
+            }
+          }
         }
 
-        if (result && result.length > 0) {
-          if (result[0].is_insert) {
-            insertedCount++;
-          } else {
-            updatedCount++;
+        if (tasksWithoutId.length > 0) {
+          const rows = (txnResults[queryIdx++] as Array<any>) || [];
+          for (const row of rows) {
+            if (row.is_insert) {
+              insertedCount++;
+            } else {
+              updatedCount++;
+            }
           }
-          syncedTasks.push(result[0]);
         }
+
+        cleanTasks = (txnResults[txnResults.length - 1] as Array<Record<string, unknown>>) || [];
+      } else {
+        // No valid tasks in batch to insert; query active user tasks
+        const queryResult = await sql`
+          SELECT 
+            t.id,
+            t.user_id,
+            t.course_id,
+            t.assignment_id,
+            t.title,
+            t.description,
+            t.due_date,
+            t.source_type,
+            t.source_url,
+            COALESCE(t.deep_link, t.source_url) AS deep_link,
+            t.raw_message_hash,
+            t.status,
+            COALESCE(t.is_completed, t.status = 'completed') AS is_completed,
+            COALESCE(t.is_completed, t.status = 'completed') AS completed,
+            t.created_at,
+            c.code AS course_code,
+            c.name AS course_name,
+            COALESCE(t.class_id, c.channel_id) AS class_id
+          FROM tasks t
+          LEFT JOIN courses c ON t.course_id = c.id
+          WHERE t.user_id = ${userId}::uuid
+          ORDER BY t.due_date ASC, t.created_at DESC;
+        `;
+        cleanTasks = queryResult as unknown as Array<Record<string, unknown>>;
       }
 
       console.log(
-        `[Fast-Path] Processed ${assignments.length} assignments: ${insertedCount} inserted, ${updatedCount} updated, 0 skipped.`
+        `[Fast-Path] Processed ${assignments.length} assignments: ${insertedCount} inserted, ${updatedCount} updated, ${skippedCount} skipped.`
       );
-
-      // Automatic cleanup: deduplicate task rows retaining latest entry per (user_id, assignment_id) or matching title/course
-      try {
-        await sql`
-          DELETE FROM tasks a USING tasks b
-          WHERE a.id < b.id 
-            AND a.user_id = b.user_id 
-            AND (
-              (a.assignment_id IS NOT NULL AND b.assignment_id IS NOT NULL AND a.assignment_id = b.assignment_id)
-              OR (a.title = b.title AND COALESCE(a.course_name, '') = COALESCE(b.course_name, ''))
-            );
-        `;
-        await sql`
-          DELETE FROM tasks a USING tasks b
-          WHERE a.user_id = b.user_id
-            AND a.title = b.title
-            AND a.assignment_id IS NULL
-            AND b.assignment_id IS NOT NULL;
-        `;
-        await sql`
-          DELETE FROM tasks
-          WHERE user_id = ${userId}::uuid
-            AND LENGTH(TRIM(title)) <= 2;
-        `;
-      } catch (cleanupErr) {
-        console.warn('[Fast-Path] Post-sync cleanup warning:', cleanupErr);
-      }
-
-      // Query active user tasks joined with courses so dashboard receives the full fresh list
-      const cleanTasks = await sql`
-        SELECT 
-          t.id,
-          t.user_id,
-          t.course_id,
-          t.assignment_id,
-          t.title,
-          t.description,
-          t.due_date,
-          t.source_type,
-          t.source_url,
-          COALESCE(t.deep_link, t.source_url) AS deep_link,
-          t.raw_message_hash,
-          t.status,
-          COALESCE(t.is_completed, t.status = 'completed') AS is_completed,
-          COALESCE(t.is_completed, t.status = 'completed') AS completed,
-          t.created_at,
-          c.code AS course_code,
-          c.name AS course_name,
-          COALESCE(t.class_id, c.channel_id) AS class_id
-        FROM tasks t
-        LEFT JOIN courses c ON t.course_id = c.id
-        WHERE t.user_id = ${userId}::uuid
-        ORDER BY t.due_date ASC;
-      `;
 
       return jsonResponse(
         {
@@ -988,10 +1211,11 @@ export async function POST(req: NextRequest) {
           count: cleanTasks.length,
           inserted: insertedCount,
           updated: updatedCount,
-          skipped: 0,
+          skipped: skippedCount,
           tasks: cleanTasks,
         },
-        200
+        200,
+        req
       );
     }
 
@@ -1426,7 +1650,7 @@ CRITICAL COURSE CONTEXT RULES (ANTI-HALLUCINATION):
               ${task.raw_message_hash},
               ${task.status}
             )
-            ON CONFLICT (raw_message_hash) 
+            ON CONFLICT (user_id, raw_message_hash) 
             DO UPDATE SET 
               title = EXCLUDED.title,
               due_date = EXCLUDED.due_date,

@@ -21,12 +21,6 @@
   "externally_connectable": {
     "matches": [
       "http://localhost:3000/*",
-      "https://*.vercel.app/*",
-      "http://localhost/*",
-      "http://localhost:*/*",
-      "http://127.0.0.1/*",
-      "http://127.0.0.1:*/*",
-      "https://localhost/*",
       "https://your-production-domain.com/*"
     ]
   },
@@ -41,7 +35,9 @@
         "https://*.assignments.onenote.com/*",
         "https://*.assignments.microsoft.com/*",
         "https://assignments.edu.cloud.microsoft/*",
-        "https://*.assignments.edu.cloud.microsoft/*"
+        "https://*.assignments.edu.cloud.microsoft/*",
+        "http://localhost:3000/*",
+        "https://your-production-domain.com/*"
       ],
       "js": [
         "content.js"

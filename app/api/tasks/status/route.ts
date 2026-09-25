@@ -16,15 +16,20 @@ export async function OPTIONS() {
   });
 }
 
+/**
+ * Handles status and completion state mutations for a specific task.
+ * Strictly scopes database update to (id, user_id) to eliminate IDOR vulnerabilities (SEC-03).
+ */
 async function handleStatusUpdate(req: NextRequest) {
   try {
     const body = await req.json();
     const taskId = body.taskId || body.id;
+    const userId = body.userId || body.user_id;
     const { completed, status } = body;
 
-    if (!taskId) {
+    if (!taskId || !userId) {
       return NextResponse.json(
-        { error: 'Missing required field: "taskId" or "id".' },
+        { error: 'Missing required fields: Both "taskId" (or "id") and "userId" are required.' },
         { status: 400, headers: corsHeaders }
       );
     }
@@ -41,6 +46,7 @@ async function handleStatusUpdate(req: NextRequest) {
           is_completed = ${isComp},
           status = ${newStatus}
         WHERE id = ${taskId}::uuid
+          AND user_id = ${userId}::uuid
         RETURNING *;
       `;
     } else if (status && ['pending', 'in_progress', 'completed'].includes(status)) {
@@ -51,6 +57,7 @@ async function handleStatusUpdate(req: NextRequest) {
           status = ${status},
           is_completed = ${isComp}
         WHERE id = ${taskId}::uuid
+          AND user_id = ${userId}::uuid
         RETURNING *;
       `;
     } else {
@@ -62,7 +69,7 @@ async function handleStatusUpdate(req: NextRequest) {
 
     if (!updatedTask) {
       return NextResponse.json(
-        { error: 'Task not found with provided ID.' },
+        { error: 'Task not found or not owned by user.' },
         { status: 404, headers: corsHeaders }
       );
     }

@@ -219,7 +219,7 @@ export default function StudentDashboardPage() {
       const res = await fetch('/api/tasks/status', {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ taskId, completed }),
+        body: JSON.stringify({ taskId, userId, completed }),
       });
 
       if (!res.ok) {

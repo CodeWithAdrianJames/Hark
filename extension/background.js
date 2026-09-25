@@ -9,8 +9,24 @@ console.log('[Hark Background] Service worker initialized.');
 // Default API endpoint
 const DEFAULT_API_ENDPOINT = 'http://localhost:3000/api/ingest';
 
-// Pending auto-sync resolvers waiting for assignments extraction from Teams frames
-let pendingSyncResolvers = [];
+// Allowed external origins for dashboard pairing (SEC-01)
+const ALLOWED_EXTERNAL_ORIGINS = [
+  'http://localhost:3000',
+  'http://127.0.0.1:3000',
+  'https://your-production-domain.com',
+];
+
+function isAllowedExternalOrigin(sender) {
+  let origin = sender?.origin;
+  if (!origin && sender?.url) {
+    try {
+      origin = new URL(sender.url).origin;
+    } catch {
+      return false;
+    }
+  }
+  return origin ? ALLOWED_EXTERNAL_ORIGINS.includes(origin) : false;
+}
 
 // Initialize defaults on install
 chrome.runtime.onInstalled.addListener((details) => {
@@ -50,115 +66,145 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return false;
     }
 
-    // Resolve userId and apiUrl from storage or active pairing
-    chrome.storage.local.get(['userId', 'apiUrl'], (localData) => {
-      chrome.storage.sync.get(['userId', 'apiUrl'], async (syncData) => {
-        const effectiveUserId =
-          message.userId ||
-          pendingSyncResolvers[0]?.userId ||
-          localData.userId ||
-          syncData.userId ||
-          '';
+    // Retrieve pending sync from session storage (survives Service Worker termination - REL-01)
+    const retrieveSession = new Promise((resolve) => {
+      if (chrome.storage.session) {
+        chrome.storage.session.get(['pendingSync'], (d) => resolve(d?.pendingSync || {}));
+      } else {
+        resolve({});
+      }
+    });
 
-        const effectiveApiUrl =
-          message.apiEndpoint ||
-          pendingSyncResolvers[0]?.apiEndpoint ||
-          localData.apiUrl ||
-          syncData.apiUrl ||
-          DEFAULT_API_ENDPOINT;
+    retrieveSession.then((pendingSync) => {
+      chrome.storage.local.get(['userId', 'apiUrl', 'apiKey'], (localData) => {
+        chrome.storage.sync.get(['userId', 'apiUrl', 'apiKey'], async (syncData) => {
+          const effectiveUserId =
+            message.userId ||
+            pendingSync.userId ||
+            localData.userId ||
+            syncData.userId ||
+            '';
 
-        if (!effectiveUserId) {
-          console.warn(
-            '[Hark Background] Cannot ingest assignments: No userId configured in storage or message.'
-          );
-          sendResponse({
-            status: 'ERROR',
-            error: 'No userId configured. Please pair Hark dashboard with the extension.',
-          });
-          return;
-        }
+          const effectiveApiUrl =
+            message.apiEndpoint ||
+            pendingSync.apiEndpoint ||
+            localData.apiUrl ||
+            syncData.apiUrl ||
+            DEFAULT_API_ENDPOINT;
 
-        try {
-          console.log(
-            `[Hark Background] Relaying ${rawAssignments.length} assignments to ${effectiveApiUrl} for user: ${effectiveUserId}...`
-          );
+          const effectiveApiKey =
+            message.apiKey ||
+            pendingSync.apiKey ||
+            localData.apiKey ||
+            syncData.apiKey ||
+            '';
 
-          const res = await fetch(effectiveApiUrl, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-              userId: effectiveUserId,
-              timezone: 'Asia/Manila',
-              assignments: rawAssignments,
-            }),
-          });
-
-          if (!res.ok) {
-            const errText = await res.text();
-            throw new Error(`Ingest HTTP ${res.status}: ${errText}`);
-          }
-
-          const data = await res.json();
-          console.log('[Hark Background] Assignments successfully ingested into Neon:', data);
-
-          const totalProcessed = (data.inserted ?? 0) + (data.updated ?? 0);
-          const responsePayload = {
-            status: 'SUCCESS',
-            count: totalProcessed || rawAssignments.length,
-            inserted: data.inserted ?? 0,
-            updated: data.updated ?? 0,
-            message: `Synced ${totalProcessed || rawAssignments.length} upcoming assignments across all classes`,
-          };
-
-          // Resolve any pending web dashboard auto-sync requests
-          if (pendingSyncResolvers.length > 0) {
-            console.log(
-              `[Hark Background] Resolving ${pendingSyncResolvers.length} pending dashboard auto-sync requests.`
+          if (!effectiveUserId) {
+            console.warn(
+              '[Hark Background] Cannot ingest assignments: No userId configured in storage or message.'
             );
-            const resolversToCall = [...pendingSyncResolvers];
-            pendingSyncResolvers = [];
-            resolversToCall.forEach((r) => r.resolve(responsePayload));
+            sendResponse({
+              status: 'ERROR',
+              error: 'No userId configured. Please pair Hark dashboard with the extension.',
+            });
+            return;
           }
 
-          // Proactively notify any open dashboard tabs so the status pill updates immediately
-          chrome.tabs.query(
-            { url: ['http://localhost:3000/*', 'https://*.vercel.app/*', 'http://localhost/*'] },
-            (dashTabs) => {
-              if (dashTabs && dashTabs.length > 0) {
-                dashTabs.forEach((tab) => {
-                  chrome.tabs.sendMessage(
-                    tab.id,
-                    {
-                      type: 'HARK_SYNC_COMPLETED',
-                      status: 'SUCCESS',
-                      count: totalProcessed || rawAssignments.length,
-                      message: responsePayload.message,
-                    },
-                    () => {
-                      if (chrome.runtime.lastError) {
-                        // ignore if content script not loaded in dashboard tab
-                      }
-                    }
-                  );
-                });
+          try {
+            console.log(
+              `[Hark Background] Relaying ${rawAssignments.length} assignments to ${effectiveApiUrl} for user: ${effectiveUserId}...`
+            );
+
+            const headers = {
+              'Content-Type': 'application/json',
+            };
+            if (effectiveApiKey) {
+              headers['Authorization'] = `Bearer ${effectiveApiKey}`;
+            }
+
+            const res = await fetch(effectiveApiUrl, {
+              method: 'POST',
+              headers,
+              body: JSON.stringify({
+                userId: effectiveUserId,
+                timezone: 'Asia/Manila',
+                assignments: rawAssignments,
+              }),
+            });
+
+            if (!res.ok) {
+              const errText = await res.text();
+              throw new Error(`Ingest HTTP ${res.status}: ${errText}`);
+            }
+
+            const data = await res.json();
+            console.log('[Hark Background] Assignments successfully ingested into Neon:', data);
+
+            // Clear pending sync in session storage
+            if (chrome.storage.session) {
+              try {
+                await chrome.storage.session.remove('pendingSync');
+              } catch {
+                // Ignore removal error
               }
             }
-          );
 
-          sendResponse({
-            status: 'SUCCESS',
-            count: totalProcessed,
-            data,
-          });
-        } catch (err) {
-          console.error('[Hark Background] Error posting assignments to /api/ingest:', err);
-          sendResponse({
-            status: 'ERROR',
-            error: err.message,
-          });
-        }
+            const totalProcessed = (data.inserted ?? 0) + (data.updated ?? 0);
+            const responsePayload = {
+              status: 'SUCCESS',
+              count: totalProcessed || rawAssignments.length,
+              inserted: data.inserted ?? 0,
+              updated: data.updated ?? 0,
+              message: `Synced ${totalProcessed || rawAssignments.length} upcoming assignments across all classes`,
+            };
+
+            // Proactively broadcast resolution to active Hark dashboard tabs (REL-01)
+            chrome.tabs.query(
+              {
+                url: [
+                  'http://localhost:3000/*',
+                  'http://127.0.0.1:3000/*',
+                  'https://your-production-domain.com/*',
+                ],
+              },
+              (dashTabs) => {
+                if (dashTabs && dashTabs.length > 0) {
+                  dashTabs.forEach((tab) => {
+                    chrome.tabs.sendMessage(
+                      tab.id,
+                      {
+                        type: 'HARK_SYNC_COMPLETED',
+                        status: 'SUCCESS',
+                        count: totalProcessed || rawAssignments.length,
+                        inserted: data.inserted ?? 0,
+                        updated: data.updated ?? 0,
+                        message: responsePayload.message,
+                        data,
+                      },
+                      () => {
+                        if (chrome.runtime.lastError) {
+                          // Ignore if listener not yet registered in tab
+                        }
+                      }
+                    );
+                  });
+                }
+              }
+            );
+
+            sendResponse({
+              status: 'SUCCESS',
+              count: totalProcessed,
+              data,
+            });
+          } catch (err) {
+            console.error('[Hark Background] Error posting assignments to /api/ingest:', err);
+            sendResponse({
+              status: 'ERROR',
+              error: err.message,
+            });
+          }
+        });
       });
     });
 
@@ -176,7 +222,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 // External web messaging listener for web dashboard pairing
 chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => {
-  console.log('[Hark Background] Received external message from:', sender.url, message);
+  console.log('[Hark Background] Received external message from:', sender.origin || sender.url, message);
+
+  // 0. Strict external origin validation (SEC-01)
+  if (!isAllowedExternalOrigin(sender)) {
+    console.warn(
+      '[Hark Background] Blocked unauthorized external message from origin:',
+      sender?.origin || sender?.url
+    );
+    sendResponse({ error: 'Unauthorized: External origin is not allowed.' });
+    return false;
+  }
 
   if (!message || typeof message !== 'object') {
     sendResponse({ error: 'Invalid message payload' });
@@ -201,11 +257,16 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
       message.apiEndpoint ||
       message.apiUrl ||
       DEFAULT_API_ENDPOINT;
+    const effectiveApiKey =
+      message.apiKey ||
+      message.token ||
+      '';
 
     const payload = {
       userId: rawUserId,
       apiUrl: targetEndpoint,
       apiEndpoint: targetEndpoint,
+      apiKey: effectiveApiKey,
       syncEnabled: true,
       isAutoIngestEnabled: true,
       lastPairedAt: new Date().toISOString(),
@@ -216,7 +277,7 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
       // Also mirror to chrome.storage.sync so popup.js and content.js have immediate access
       if (chrome.storage.sync) {
         chrome.storage.sync.set(payload, () => {
-          console.log('[Hark Background] Successfully paired user to storage:', rawUserId);
+          console.log('[Hark Background] Successfully paired user and API key to storage:', rawUserId);
           sendResponse({
             success: true,
             savedUserId: rawUserId,
@@ -256,10 +317,10 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
     return true; // Keep channel open for async response
   }
 
-  // 4. Cross-tab trigger for global assignments hub auto-sync
+  // 4. Cross-tab trigger for global assignments hub auto-sync (REL-01)
   if (message.type === 'HARK_TRIGGER_AUTO_SYNC') {
-    chrome.storage.local.get(['userId', 'apiUrl'], (localData) => {
-      chrome.storage.sync.get(['userId', 'apiUrl'], (syncData) => {
+    chrome.storage.local.get(['userId', 'apiUrl', 'apiKey'], (localData) => {
+      chrome.storage.sync.get(['userId', 'apiUrl', 'apiKey'], (syncData) => {
         const effectiveUserId =
           message.userId ||
           localData.userId ||
@@ -270,9 +331,14 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
           localData.apiUrl ||
           syncData.apiUrl ||
           DEFAULT_API_ENDPOINT;
+        const effectiveApiKey =
+          message.apiKey ||
+          localData.apiKey ||
+          syncData.apiKey ||
+          '';
 
         // Query open browser tabs for Teams
-        chrome.tabs.query({ url: '*://teams.microsoft.com/*' }, (tabs) => {
+        chrome.tabs.query({ url: '*://teams.microsoft.com/*' }, async (tabs) => {
           if (!tabs || tabs.length === 0) {
             console.log('[Hark Background] No open MS Teams tabs found.');
             sendResponse({
@@ -285,38 +351,35 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
           // Prioritize active or focused tab, otherwise use first tab
           const activeTab = tabs.find((t) => t.active) || tabs[0];
           console.log(
-            `[Hark Background] Found ${tabs.length} Teams tab(s). Registering auto-sync listener and relaying SCAN_ASSIGNMENTS_HUB to Tab ${activeTab.id}...`
+            `[Hark Background] Found ${tabs.length} Teams tab(s). Relaying SCAN_ASSIGNMENTS_HUB to Tab ${activeTab.id}...`
           );
 
-          // Track this pending auto-sync resolver
-          let isResolved = false;
-          const syncTimeout = setTimeout(() => {
-            if (!isResolved) {
-              isResolved = true;
-              pendingSyncResolvers = pendingSyncResolvers.filter((r) => r.id !== resolverEntry.id);
-              console.log('[Hark Background] Auto-sync wait period concluded.');
-              sendResponse({
-                status: 'SUCCESS',
-                count: 0,
-                message: 'Sync complete. No new assignments found.',
-              });
-            }
-          }, 8000);
-
-          const resolverEntry = {
-            id: Date.now() + Math.random(),
+          // Persist pending sync state in session storage so it survives SW termination (REL-01)
+          const syncId = `sync_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+          const syncState = {
+            syncId,
             userId: effectiveUserId,
             apiEndpoint: targetEndpoint,
-            resolve: (res) => {
-              if (!isResolved) {
-                isResolved = true;
-                clearTimeout(syncTimeout);
-                sendResponse(res);
-              }
-            },
+            apiKey: effectiveApiKey,
+            tabId: activeTab.id,
+            startedAt: Date.now(),
           };
 
-          pendingSyncResolvers.push(resolverEntry);
+          if (chrome.storage.session) {
+            try {
+              await chrome.storage.session.set({ pendingSync: syncState });
+            } catch (err) {
+              console.warn('[Hark Background] Could not set pendingSync in storage.session:', err);
+            }
+          }
+
+          let hasReplied = false;
+          const replyOnce = (res) => {
+            if (!hasReplied) {
+              hasReplied = true;
+              sendResponse(res);
+            }
+          };
 
           // Relay trigger to Teams tab
           chrome.tabs.sendMessage(
@@ -325,6 +388,7 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
               type: 'SCAN_ASSIGNMENTS_HUB',
               userId: effectiveUserId,
               apiEndpoint: targetEndpoint,
+              syncId,
             },
             (contentResponse) => {
               if (chrome.runtime.lastError) {
@@ -332,21 +396,23 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
                   '[Hark Background] Content script communication note:',
                   chrome.runtime.lastError.message
                 );
-                // Don't immediately fail; iframe might report HARK_ASSIGNMENTS_FOUND independently
-                return;
               }
 
-              console.log(
-                '[Hark Background] Immediate content response from Tab:',
-                contentResponse
-              );
-
               // If the content script already found items directly in this scan
-              if (contentResponse && contentResponse.count > 0 && contentResponse.status === 'SUCCESS') {
-                resolverEntry.resolve(contentResponse);
+              if (contentResponse && contentResponse.status === 'SUCCESS') {
+                replyOnce(contentResponse);
               }
             }
           );
+
+          // Safety timeout to ensure response channel concludes cleanly
+          setTimeout(() => {
+            replyOnce({
+              status: 'SUCCESS',
+              count: 0,
+              message: 'Sync dispatched to Teams.',
+            });
+          }, 7000);
         });
       });
     });

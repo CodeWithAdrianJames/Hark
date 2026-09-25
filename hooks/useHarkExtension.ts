@@ -103,6 +103,7 @@ export function useHarkExtension(activeUserId?: string): HarkExtensionState {
               type: 'HARK_SET_USER',
               userId: targetUserId,
               apiEndpoint,
+              apiKey: process.env.NEXT_PUBLIC_INGEST_API_KEY || '',
             },
             (response) => {
               if (window.chrome?.runtime?.lastError || !response?.success) {
@@ -159,6 +160,7 @@ export function useHarkExtension(activeUserId?: string): HarkExtensionState {
               type: 'HARK_TRIGGER_AUTO_SYNC',
               userId: activeUserId,
               apiEndpoint,
+              apiKey: process.env.NEXT_PUBLIC_INGEST_API_KEY || '',
             },
             (response) => {
               clearTimeout(timeoutId);
@@ -305,6 +307,29 @@ export function useHarkExtension(activeUserId?: string): HarkExtensionState {
       triggerAutoSync();
     }
   }, [isInstalled, activeUserId, extensionId, triggerAutoSync]);
+
+  // Listen for broadcast HARK_SYNC_COMPLETED from extension content bridge (REL-01)
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    const handleBroadcast = (event: MessageEvent) => {
+      if (event.origin !== window.location.origin) return;
+      if (event.data?.type === 'HARK_SYNC_COMPLETED' && event.data?.source === 'hark-extension') {
+        const count = event.data.count ?? 0;
+        setSyncStatus('SUCCESS');
+        setSyncedCount(count);
+        setSyncMessage(event.data.message || `Synced ${count} upcoming assignments across all classes`);
+        setLastSyncedAt(new Date());
+
+        setTimeout(() => {
+          setSyncStatus('IDLE');
+        }, 4000);
+      }
+    };
+
+    window.addEventListener('message', handleBroadcast);
+    return () => window.removeEventListener('message', handleBroadcast);
+  }, []);
 
   return {
     isInstalled,
