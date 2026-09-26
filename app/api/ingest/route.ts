@@ -172,6 +172,33 @@ interface GeminiExtractionResult {
 }
 
 /**
+ * Generates an RFC 4122 compliant deterministic synthetic UUID from an input string.
+ */
+function generateSyntheticUuid(str: string): string {
+  let h1 = 0xdeadbeef, h2 = 0x41c6ce57, h3 = 0x9e3779b9, h4 = 0x7b5d21a1;
+  const s = String(str || '').trim().toLowerCase();
+  for (let i = 0; i < s.length; i++) {
+    const ch = s.charCodeAt(i);
+    h1 = Math.imul(h1 ^ ch, 2654435761);
+    h2 = Math.imul(h2 ^ ch, 1597334677);
+    h3 = Math.imul(h3 ^ ch, 3812015801);
+    h4 = Math.imul(h4 ^ ch, 2860486313);
+  }
+  const p1 = (h1 >>> 0).toString(16).padStart(8, '0');
+  const p2 = (h2 >>> 0).toString(16).padStart(8, '0');
+  const p3 = (h3 >>> 0).toString(16).padStart(8, '0');
+  const p4 = (h4 >>> 0).toString(16).padStart(8, '0');
+  const hex = p1 + p2 + p3 + p4;
+
+  const timeLow = hex.slice(0, 8);
+  const timeMid = hex.slice(8, 12);
+  const timeHiAndVersion = '4' + hex.slice(13, 16);
+  const clockSeq = ((parseInt(hex.slice(16, 18), 16) & 0x3f) | 0x80).toString(16).padStart(2, '0') + hex.slice(18, 20);
+  const node = hex.slice(20, 32);
+  return `${timeLow}-${timeMid}-${timeHiAndVersion}-${clockSeq}-${node}`.toLowerCase();
+}
+
+/**
  * Computes a deterministic SHA-256 hash for duplicate detection.
  * For native assignment cards, hashes the semantic title + rawDueString so that
  * re-scans and different DOM container IDs always map to the exact same hash.
@@ -751,6 +778,7 @@ export async function POST(req: NextRequest) {
         id?: string;
         classId?: string;
         channelId?: string;
+        channelName?: string;
         title?: string;
         courseName?: string;
         courseCode?: string;
@@ -776,6 +804,19 @@ export async function POST(req: NextRequest) {
           channel_id: (c.channel_id as string) || null,
         }));
 
+      // Fetch user's existing tasks from Neon to guarantee conflict-free deduplication
+      const existingTasks = await sql`
+        SELECT id, assignment_id, raw_message_hash, title
+        FROM tasks
+        WHERE user_id = ${userId}::uuid
+      `;
+      const existingAssignIds = new Set(
+        existingTasks.map((t: Record<string, unknown>) => t.assignment_id as string).filter(Boolean)
+      );
+      const existingHashMap = new Map(
+        existingTasks.map((t: Record<string, unknown>) => [t.raw_message_hash as string, t.assignment_id as string | null])
+      );
+
       interface PreparedTask {
         userId: string;
         assignmentId: string | null;
@@ -794,20 +835,30 @@ export async function POST(req: NextRequest) {
         isCompleted: boolean;
       }
 
-      // In-memory deduplication by assignment_id (or raw_message_hash for fallback items)
-      // to prevent PostgreSQL "ON CONFLICT DO UPDATE command cannot affect row a second time" errors.
+      // In-memory deduplication:
+      // - tasksWithIdMap: items with verified native GUIDs (keyed by assignmentId, upserted on (user_id, assignment_id))
+      // - tasksWithoutIdMap: items with synthetic UUIDs or valid fallback tasks (keyed by rawHash, upserted on (user_id, raw_message_hash))
       const tasksWithIdMap = new Map<string, PreparedTask>();
       const tasksWithoutIdMap = new Map<string, PreparedTask>();
       let skippedCount = 0;
 
       for (const item of assignments) {
-        if (!item || !item.title) {
+        if (!item || typeof item !== 'object' || !item.title) {
+          console.warn('[Ingest Warning] Rejected assignment: missing object or empty title.', { item });
           skippedCount++;
           continue;
         }
 
         const title = item.title.trim();
         if (title.length <= 2) {
+          console.warn(`[Ingest Warning] Rejected assignment: title too short ("${title}").`, { item });
+          skippedCount++;
+          continue;
+        }
+
+        // Filter out navigation headers or status filters that might be extracted as titles
+        if (/^(?:upcoming|past due|completed|assigned|due|past|drafts|returned)$/i.test(title)) {
+          console.warn(`[Ingest Warning] Rejected assignment: title is a navigation header ("${title}").`, { item });
           skippedCount++;
           continue;
         }
@@ -821,13 +872,20 @@ export async function POST(req: NextRequest) {
         let dueDateIso = parseAssignmentDueStringToUtcIso(rawDue, userTimezone);
 
         if (!dueDateIso) {
+          console.warn(`[Ingest Warning] Could not parse due date string ("${rawDue}") for assignment "${title}". Defaulting to 7 days from now.`);
           // Dynamic fallback to 7 days from now at 23:59:59 UTC+8
           const futureRef = new Date(Date.now() + 7 * 86400000);
           dueDateIso = futureRef.toISOString();
         }
 
         // Ground-truth course resolution
-        const cleanName = cleanCourseName(item.courseName) || 'General';
+        if (item.courseName && (/\bdue\b/i.test(item.courseName) || /\b\d{1,2}:\d{2}\b/.test(item.courseName))) {
+          console.warn(`[Ingest Warning] Course name for "${title}" contained deadline/time string ("${item.courseName}"). Stripping invalid course name.`);
+        }
+        let cleanName = cleanCourseName(item.courseName);
+        if (!cleanName || /^due\b/i.test(cleanName)) {
+          cleanName = cleanCourseName(item.channelName || (item as any).course_name || (item as any).teamName || '') || 'General';
+        }
         const cleanCode = item.courseCode && !/^due\b/i.test(item.courseCode)
           ? normalizeCourseCode(item.courseCode)
           : extractCourseCode(cleanName);
@@ -841,12 +899,27 @@ export async function POST(req: NextRequest) {
           ''
         ).trim();
         const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-        const assignmentId = UUID_REGEX.test(rawAssignmentId) ? rawAssignmentId : null;
+        const hasValidUuid = UUID_REGEX.test(rawAssignmentId) && rawAssignmentId !== 'NULL_OR_MISSING';
+        const isSynthetic = Boolean((item as any).isSynthetic) || rawAssignmentId.startsWith('synth-') || !hasValidUuid;
 
-        // Deterministic raw message hash synchronized 1:1 with assignmentId if available
-        const rawHash = assignmentId
+        let assignmentId: string;
+        if (hasValidUuid && !isSynthetic) {
+          assignmentId = rawAssignmentId;
+        } else {
+          assignmentId = generateSyntheticUuid(`${cleanName}_${title}`);
+          console.warn(`[Ingest Warning] Assignment "${title}" missing native GUID (received: "${rawAssignmentId}"). Generated deterministic synthetic UUID: ${assignmentId}`);
+        }
+
+        // Deterministic raw message hash synchronized 1:1 with assignmentId if native GUID, or canonical task hash for synthetic
+        const rawHash = (hasValidUuid && !isSynthetic)
           ? crypto.createHash('sha256').update(`assignment:${userId}:${assignmentId}`).digest('hex')
           : computeCanonicalTaskHash(userId, cleanCode, title);
+
+        // Guard against synthetic ID collision with a different task in DB
+        if (isSynthetic && existingAssignIds.has(assignmentId) && existingHashMap.get(rawHash) !== assignmentId) {
+          console.warn(`[Ingest Warning] Synthetic assignmentId ${assignmentId} already belongs to another task. Resolving collision.`);
+          assignmentId = generateSyntheticUuid(`${cleanName}_${title}_${rawHash.slice(0, 8)}`);
+        }
 
         const classId = (
           item.classId ||
@@ -891,7 +964,7 @@ export async function POST(req: NextRequest) {
           isCompleted: false,
         };
 
-        if (assignmentId) {
+        if (hasValidUuid && !isSynthetic) {
           tasksWithIdMap.set(assignmentId, prepared);
         } else {
           tasksWithoutIdMap.set(rawHash, prepared);
@@ -1000,11 +1073,12 @@ export async function POST(req: NextRequest) {
             `);
           }
 
-          // 2. Parameterized multi-row batch upsert for items without assignmentId
+          // 2. Parameterized multi-row batch upsert for items with synthetic UUIDs or fallback items (keyed by raw_message_hash)
           if (tasksWithoutId.length > 0) {
             queries.push(tx`
               INSERT INTO tasks (
                 user_id,
+                assignment_id,
                 course_id,
                 course_name,
                 class_id,
@@ -1023,6 +1097,7 @@ export async function POST(req: NextRequest) {
               )
               SELECT 
                 v.user_id,
+                v.assignment_id,
                 v.course_id,
                 v.course_name,
                 v.class_id,
@@ -1040,6 +1115,7 @@ export async function POST(req: NextRequest) {
                 NOW()
               FROM unnest(
                 ${tasksWithoutId.map((t) => t.userId)}::uuid[],
+                ${tasksWithoutId.map((t) => t.assignmentId)}::text[],
                 ${tasksWithoutId.map((t) => t.courseId)}::uuid[],
                 ${tasksWithoutId.map((t) => t.courseName)}::text[],
                 ${tasksWithoutId.map((t) => t.classId)}::text[],
@@ -1055,6 +1131,7 @@ export async function POST(req: NextRequest) {
                 ${tasksWithoutId.map((t) => t.isCompleted)}::boolean[]
               ) AS v(
                 user_id,
+                assignment_id,
                 course_id,
                 course_name,
                 class_id,
@@ -1071,6 +1148,7 @@ export async function POST(req: NextRequest) {
               )
               ON CONFLICT (user_id, raw_message_hash)
               DO UPDATE SET
+                assignment_id = COALESCE(tasks.assignment_id, EXCLUDED.assignment_id),
                 deep_link = EXCLUDED.deep_link,
                 title = EXCLUDED.title,
                 course_name = EXCLUDED.course_name,
@@ -1091,7 +1169,7 @@ export async function POST(req: NextRequest) {
               FROM tasks a
               JOIN tasks b ON a.user_id = b.user_id 
                 AND a.assignment_id = b.assignment_id 
-                AND a.id < b.id
+                AND (a.created_at < b.created_at OR (a.created_at = b.created_at AND a.id < b.id))
               WHERE a.is_completed = true AND b.is_completed = false
             )
             UPDATE tasks t
@@ -1100,10 +1178,10 @@ export async function POST(req: NextRequest) {
             WHERE t.id = u.target_id;
           `);
 
-          // 4. Delete duplicate tasks by assignment_id
+          // 4. Delete duplicate tasks by assignment_id (keep newest by created_at)
           queries.push(tx`
             DELETE FROM tasks a USING tasks b
-            WHERE a.id < b.id 
+            WHERE (a.created_at < b.created_at OR (a.created_at = b.created_at AND a.id < b.id))
               AND a.user_id = ${userId}::uuid
               AND b.user_id = ${userId}::uuid
               AND a.assignment_id IS NOT NULL 
@@ -1111,15 +1189,14 @@ export async function POST(req: NextRequest) {
               AND a.assignment_id = b.assignment_id;
           `);
 
-          // 5. State-transfer CTE: preserve is_completed and status for title matches (unassociated tasks merged into native assignment)
+          // 5. State-transfer CTE: preserve is_completed and status for title matches across scans
           queries.push(tx`
             WITH to_update_by_title AS (
               SELECT b.id AS target_id, a.is_completed, a.status
               FROM tasks a
               JOIN tasks b ON a.user_id = b.user_id
                 AND a.title = b.title
-                AND a.assignment_id IS NULL
-                AND b.assignment_id IS NOT NULL
+                AND (a.created_at < b.created_at OR (a.created_at = b.created_at AND a.id < b.id))
               WHERE a.is_completed = true AND b.is_completed = false
             )
             UPDATE tasks t
@@ -1128,21 +1205,23 @@ export async function POST(req: NextRequest) {
             WHERE t.id = u.target_id;
           `);
 
-          // 6. Delete unassociated title duplicates
+          // 6. Delete superseded title duplicates (keep newest by created_at)
           queries.push(tx`
             DELETE FROM tasks a USING tasks b
-            WHERE a.user_id = ${userId}::uuid
+            WHERE (a.created_at < b.created_at OR (a.created_at = b.created_at AND a.id < b.id))
+              AND a.user_id = ${userId}::uuid
               AND b.user_id = ${userId}::uuid
-              AND a.title = b.title
-              AND a.assignment_id IS NULL
-              AND b.assignment_id IS NOT NULL;
+              AND a.title = b.title;
           `);
 
-          // 7. Delete phantom noise titles
+          // 7. Delete phantom noise titles & navigation headers
           queries.push(tx`
             DELETE FROM tasks
             WHERE user_id = ${userId}::uuid
-              AND LENGTH(TRIM(title)) <= 2;
+              AND (
+                LENGTH(TRIM(title)) <= 2
+                OR LOWER(TRIM(title)) IN ('upcoming', 'past due', 'completed', 'assigned', 'due', 'past', 'drafts', 'returned')
+              );
           `);
 
           // 8. Query active user tasks atomically inside the transaction (PRF-03, REL-02)

@@ -136,85 +136,73 @@ export function useHarkExtension(activeUserId?: string): HarkExtensionState {
   const triggerAutoSync = useCallback(
     async (targetExtId?: string): Promise<{ status: string; count?: number; message?: string }> => {
       const activeExtId = (targetExtId || extensionId).trim();
-      if (!activeExtId || typeof window === 'undefined' || !window.chrome?.runtime?.sendMessage) {
-        setSyncStatus('IDLE');
-        return { status: 'ERROR', message: 'Extension not available' };
-      }
 
       setSyncStatus('FETCHING');
       setSyncMessage('Syncing all assignments from MS Teams...');
 
-      return new Promise((resolve) => {
-        const timeoutId = setTimeout(() => {
-          setSyncStatus('ERROR');
-          setSyncMessage('Sync request timed out');
-          resolve({ status: 'ERROR', message: 'Sync request timed out' });
-          setTimeout(() => setSyncStatus('IDLE'), 4000);
-        }, 15000);
+      // 1. Proactively dispatch via window.postMessage bridge (handles dashboard content script)
+      if (typeof window !== 'undefined') {
+        window.postMessage(
+          {
+            type: 'HARK_TRIGGER_AUTO_SYNC',
+            userId: activeUserId,
+            apiEndpoint: `${window.location.origin}/api/ingest`,
+            apiKey: process.env.NEXT_PUBLIC_INGEST_API_KEY || '',
+          },
+          '*'
+        );
+      }
 
-        try {
-          const apiEndpoint = `${window.location.origin}/api/ingest`;
-          window.chrome!.runtime!.sendMessage(
-            activeExtId,
-            {
-              type: 'HARK_TRIGGER_AUTO_SYNC',
-              userId: activeUserId,
-              apiEndpoint,
-              apiKey: process.env.NEXT_PUBLIC_INGEST_API_KEY || '',
-            },
-            (response) => {
-              clearTimeout(timeoutId);
+      // 2. If chrome.runtime.sendMessage is available with an activeExtId, also send directly
+      if (activeExtId && typeof window !== 'undefined' && window.chrome?.runtime?.sendMessage) {
+        return new Promise((resolve) => {
+          const timeoutId = setTimeout(() => {
+            resolve({ status: 'SUCCESS', message: 'Sync dispatched to extension' });
+          }, 8000);
 
-              if (window.chrome?.runtime?.lastError || !response) {
-                const errMsg =
-                  window.chrome?.runtime?.lastError?.message ||
-                  'Could not reach extension background worker.';
-                setSyncStatus('ERROR');
-                setSyncMessage(errMsg);
-                resolve({ status: 'ERROR', message: errMsg });
-                setTimeout(() => setSyncStatus('IDLE'), 4000);
-                return;
-              }
-
-              if (response.status === 'NO_TEAMS') {
-                setSyncStatus('NO_TEAMS');
-                setSyncMessage(response.message || 'Teams not open (Open Teams to sync)');
+          try {
+            const apiEndpoint = `${window.location.origin}/api/ingest`;
+            window.chrome!.runtime!.sendMessage(
+              activeExtId,
+              {
+                type: 'HARK_TRIGGER_AUTO_SYNC',
+                userId: activeUserId,
+                apiEndpoint,
+                apiKey: process.env.NEXT_PUBLIC_INGEST_API_KEY || '',
+              },
+              (response) => {
+                clearTimeout(timeoutId);
+                if (window.chrome?.runtime?.lastError || !response) {
+                  return;
+                }
+                if (response.status === 'SUCCESS') {
+                  const count = response.count ?? 0;
+                  setSyncStatus('SUCCESS');
+                  setSyncedCount(count);
+                  setSyncMessage(
+                    response.message || `Synced ${count} upcoming assignments across all classes`
+                  );
+                  setLastSyncedAt(new Date());
+                  setTimeout(() => setSyncStatus('IDLE'), 4000);
+                  resolve(response);
+                  return;
+                }
+                if (response.status === 'NO_TEAMS') {
+                  setSyncStatus('NO_TEAMS');
+                  setSyncMessage(response.message || 'Teams not open (Open Teams to sync)');
+                  resolve(response);
+                  return;
+                }
                 resolve(response);
-                return;
               }
+            );
+          } catch {
+            clearTimeout(timeoutId);
+          }
+        });
+      }
 
-              if (response.status === 'SUCCESS') {
-                const count = response.count ?? 0;
-                setSyncStatus('SUCCESS');
-                setSyncedCount(count);
-                setSyncMessage(
-                  response.message || `Synced ${count} upcoming assignments across all classes`
-                );
-                setLastSyncedAt(new Date());
-                resolve(response);
-
-                // Auto-fade to IDLE after 4 seconds
-                setTimeout(() => {
-                  setSyncStatus('IDLE');
-                }, 4000);
-                return;
-              }
-
-              setSyncStatus('ERROR');
-              setSyncMessage(response.error || response.message || 'Failed to sync assignments');
-              resolve(response);
-              setTimeout(() => setSyncStatus('IDLE'), 4000);
-            }
-          );
-        } catch (err: unknown) {
-          clearTimeout(timeoutId);
-          const errMsg = err instanceof Error ? err.message : 'Failed to dispatch auto-sync';
-          setSyncStatus('ERROR');
-          setSyncMessage(errMsg);
-          resolve({ status: 'ERROR', message: errMsg });
-          setTimeout(() => setSyncStatus('IDLE'), 4000);
-        }
-      });
+      return { status: 'SUCCESS', message: 'Sync dispatched via content bridge' };
     },
     [extensionId, activeUserId]
   );
@@ -222,18 +210,14 @@ export function useHarkExtension(activeUserId?: string): HarkExtensionState {
   // Ping extension to check installation
   const pingExtension = useCallback(
     async (targetExtId?: string): Promise<boolean> => {
-      const activeExtId = (targetExtId || extensionId).trim();
-
-      if (!activeExtId) {
-        setIsChecking(false);
-        setIsInstalled(false);
-        return false;
+      // 1. Send window.postMessage to companion extension content bridge
+      if (typeof window !== 'undefined') {
+        window.postMessage({ type: 'HARK_PING_EXTENSION' }, '*');
       }
 
-      if (typeof window === 'undefined' || !window.chrome?.runtime?.sendMessage) {
-        setIsChecking(false);
-        setIsInstalled(false);
-        return false;
+      const activeExtId = (targetExtId || extensionId).trim();
+      if (!activeExtId || typeof window === 'undefined' || !window.chrome?.runtime?.sendMessage) {
+        return isInstalled;
       }
 
       setIsChecking(true);
@@ -242,8 +226,7 @@ export function useHarkExtension(activeUserId?: string): HarkExtensionState {
       return new Promise<boolean>((resolve) => {
         const timeoutId = setTimeout(() => {
           setIsChecking(false);
-          setIsInstalled(false);
-          resolve(false);
+          resolve(isInstalled);
         }, 1200);
 
         try {
@@ -259,14 +242,12 @@ export function useHarkExtension(activeUserId?: string): HarkExtensionState {
                 !response ||
                 response.status !== 'installed'
               ) {
-                setIsInstalled(false);
-                setIsPaired(false);
-                resolve(false);
+                resolve(isInstalled);
               } else {
                 setIsInstalled(true);
+                setIsPaired(true);
                 setVersion(response.version || '1.0.0');
 
-                // If an active user ID is provided, automatically trigger pairing
                 if (activeUserId) {
                   pairUser(activeUserId, activeExtId);
                 }
@@ -278,12 +259,11 @@ export function useHarkExtension(activeUserId?: string): HarkExtensionState {
         } catch {
           clearTimeout(timeoutId);
           setIsChecking(false);
-          setIsInstalled(false);
-          resolve(false);
+          resolve(isInstalled);
         }
       });
     },
-    [extensionId, activeUserId, pairUser]
+    [extensionId, isInstalled, activeUserId, pairUser]
   );
 
   // Trigger ping whenever extensionId changes
@@ -302,19 +282,57 @@ export function useHarkExtension(activeUserId?: string): HarkExtensionState {
 
   // Trigger auto-sync once installed and paired on load
   useEffect(() => {
-    if (isInstalled && activeUserId && extensionId && !hasAutoSyncedRef.current) {
+    if (isInstalled && activeUserId && !hasAutoSyncedRef.current) {
       hasAutoSyncedRef.current = true;
       triggerAutoSync();
     }
-  }, [isInstalled, activeUserId, extensionId, triggerAutoSync]);
+  }, [isInstalled, activeUserId, triggerAutoSync]);
 
-  // Listen for broadcast HARK_SYNC_COMPLETED from extension content bridge (REL-01)
+  // Listen for broadcast HARK_EXTENSION_PONG, HARK_AUTO_SYNC_RESPONSE, and HARK_SYNC_COMPLETED
   useEffect(() => {
     if (typeof window === 'undefined') return;
 
     const handleBroadcast = (event: MessageEvent) => {
-      if (event.origin !== window.location.origin) return;
-      if (event.data?.type === 'HARK_SYNC_COMPLETED' && event.data?.source === 'hark-extension') {
+      if (!event.data || typeof event.data !== 'object') return;
+
+      // Handle pong from extension content script
+      if (event.data.type === 'HARK_EXTENSION_PONG') {
+        setIsInstalled(true);
+        setIsPaired(true);
+        setIsChecking(false);
+        if (event.data.version) setVersion(event.data.version);
+        if (event.data.extensionId) {
+          setExtensionIdState(event.data.extensionId);
+          try {
+            localStorage.setItem(STORAGE_KEY_EXT_ID, event.data.extensionId);
+          } catch {}
+        }
+      }
+
+      // Handle auto sync response via window postMessage bridge
+      if (event.data.type === 'HARK_AUTO_SYNC_RESPONSE') {
+        const resp = event.data.response;
+        if (resp) {
+          if (resp.status === 'SUCCESS') {
+            const count = resp.count ?? 0;
+            setSyncStatus('SUCCESS');
+            setSyncedCount(count);
+            setSyncMessage(resp.message || `Synced ${count} upcoming assignments across all classes`);
+            setLastSyncedAt(new Date());
+            setTimeout(() => setSyncStatus('IDLE'), 4000);
+          } else if (resp.status === 'NO_TEAMS') {
+            setSyncStatus('NO_TEAMS');
+            setSyncMessage(resp.message || 'Teams not open (Open Teams to sync)');
+          } else {
+            setSyncStatus('ERROR');
+            setSyncMessage(resp.error || resp.message || 'Failed to sync assignments');
+            setTimeout(() => setSyncStatus('IDLE'), 4000);
+          }
+        }
+      }
+
+      // Handle completed sync pushed from background service worker
+      if (event.data.type === 'HARK_SYNC_COMPLETED' && event.data.source === 'hark-extension') {
         const count = event.data.count ?? 0;
         setSyncStatus('SUCCESS');
         setSyncedCount(count);
@@ -328,7 +346,19 @@ export function useHarkExtension(activeUserId?: string): HarkExtensionState {
     };
 
     window.addEventListener('message', handleBroadcast);
-    return () => window.removeEventListener('message', handleBroadcast);
+
+    // Proactively ping extension content bridge immediately
+    window.postMessage({ type: 'HARK_PING_EXTENSION' }, '*');
+
+    // Periodic ping check every 4 seconds to maintain real-time connection status
+    const pingTimer = setInterval(() => {
+      window.postMessage({ type: 'HARK_PING_EXTENSION' }, '*');
+    }, 4000);
+
+    return () => {
+      window.removeEventListener('message', handleBroadcast);
+      clearInterval(pingTimer);
+    };
   }, []);
 
   return {

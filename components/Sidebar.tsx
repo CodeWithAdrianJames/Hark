@@ -175,7 +175,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 />
                 <span className="text-xs font-semibold text-slate-800">
                   {extensionState.isInstalled
-                    ? 'Extension Active'
+                    ? 'Connected'
                     : 'Pair Extension'}
                 </span>
               </div>

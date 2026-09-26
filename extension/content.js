@@ -28,21 +28,85 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
       window.location.hostname.includes('assignments.microsoft.com') ||
       window.location.hostname.includes('assignments.edu.cloud.microsoft'));
 
-  // If running on a Hark web dashboard tab, listen for HARK_SYNC_COMPLETED from service worker
+  // If running on a Hark web dashboard tab, bridge communication with extension service worker
   if (!isTeamsDomain) {
-    if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
-      chrome.runtime.onMessage.addListener((message) => {
-        if (message && message.type === 'HARK_SYNC_COMPLETED') {
+    if (typeof window !== 'undefined') {
+      // 1. Listen for messages from web dashboard page (window.postMessage)
+      window.addEventListener('message', (event) => {
+        if (!event.data || typeof event.data !== 'object') return;
+
+        // Handle ping from dashboard
+        if (event.data.type === 'HARK_PING_EXTENSION') {
+          const extId = typeof chrome !== 'undefined' ? chrome.runtime?.id || '' : '';
+          const manifest = typeof chrome !== 'undefined' ? chrome.runtime?.getManifest?.() : null;
           window.postMessage(
             {
-              type: 'HARK_SYNC_COMPLETED',
+              type: 'HARK_EXTENSION_PONG',
               source: 'hark-extension',
-              ...message,
+              isInstalled: true,
+              isPaired: true,
+              version: manifest?.version || '1.0.0',
+              extensionId: extId,
             },
-            window.location.origin
+            '*'
           );
         }
+
+        // Handle trigger auto sync request from dashboard
+        if (event.data.type === 'HARK_TRIGGER_AUTO_SYNC') {
+          if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
+            chrome.runtime.sendMessage(
+              {
+                type: 'HARK_TRIGGER_AUTO_SYNC',
+                userId: event.data.userId,
+                apiEndpoint: event.data.apiEndpoint || `${window.location.origin}/api/ingest`,
+                apiKey: event.data.apiKey || '',
+              },
+              (response) => {
+                window.postMessage(
+                  {
+                    type: 'HARK_AUTO_SYNC_RESPONSE',
+                    source: 'hark-extension',
+                    response: response || { status: 'ERROR', message: 'No response from service worker' },
+                  },
+                  '*'
+                );
+              }
+            );
+          }
+        }
       });
+
+      // 2. Listen for push messages from background service worker and relay to dashboard
+      if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
+        chrome.runtime.onMessage.addListener((message) => {
+          if (message && message.type === 'HARK_SYNC_COMPLETED') {
+            window.postMessage(
+              {
+                type: 'HARK_SYNC_COMPLETED',
+                source: 'hark-extension',
+                ...message,
+              },
+              window.location.origin
+            );
+          }
+        });
+      }
+
+      // Proactively advertise extension presence to dashboard on load
+      const extId = typeof chrome !== 'undefined' ? chrome.runtime?.id || '' : '';
+      const manifest = typeof chrome !== 'undefined' ? chrome.runtime?.getManifest?.() : null;
+      window.postMessage(
+        {
+          type: 'HARK_EXTENSION_PONG',
+          source: 'hark-extension',
+          isInstalled: true,
+          isPaired: true,
+          version: manifest?.version || '1.0.0',
+          extensionId: extId,
+        },
+        '*'
+      );
     }
     return;
   }
@@ -173,11 +237,12 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
     if (!raw || typeof raw !== 'string') return '';
     let text = raw.trim();
 
-    // 0. Strict check: Never allow strings starting with "Due", "past due", or time strings to be course names
+    // 0. Strict check: Never allow strings containing "Due", "due at", or time strings to be course names
     if (
       /^due\b/i.test(text) ||
       /\bdue\s+(?:at|by|on|date)\b/i.test(text) ||
-      /^\d{1,2}:\d{2}/.test(text) ||
+      /\bdue\b/i.test(text) ||
+      /\b\d{1,2}:\d{2}\s*(?:am|pm)?\b/i.test(text) ||
       /^at\s+\d{1,2}:\d{2}/i.test(text)
     ) {
       return '';
@@ -1635,6 +1700,65 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
     const seenSignatures = new Set();
     const fallbackDeepLink = 'https://teams.microsoft.com/_#/assignments';
 
+    const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const UUID_EXTRACT_REGEX = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+    const ASSIGNMENT_LINK_REGEX = /\/assignments\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
+    const CLASSES_ASSIGNMENT_REGEX = /\/classes\/([a-f0-9-]+)\/assignments\/([a-f0-9-]+)/i;
+
+    /**
+     * Generates a deterministic RFC 4122 compliant synthetic UUID from an input string.
+     */
+    function generateDeterministicUuid(str) {
+      let h1 = 0xdeadbeef, h2 = 0x41c6ce57, h3 = 0x9e3779b9, h4 = 0x7b5d21a1;
+      const s = String(str || '').trim().toLowerCase();
+      for (let i = 0; i < s.length; i++) {
+        const ch = s.charCodeAt(i);
+        h1 = Math.imul(h1 ^ ch, 2654435761);
+        h2 = Math.imul(h2 ^ ch, 1597334677);
+        h3 = Math.imul(h3 ^ ch, 3812015801);
+        h4 = Math.imul(h4 ^ ch, 2860486313);
+      }
+      const p1 = (h1 >>> 0).toString(16).padStart(8, '0');
+      const p2 = (h2 >>> 0).toString(16).padStart(8, '0');
+      const p3 = (h3 >>> 0).toString(16).padStart(8, '0');
+      const p4 = (h4 >>> 0).toString(16).padStart(8, '0');
+      const hex = p1 + p2 + p3 + p4;
+
+      const timeLow = hex.slice(0, 8);
+      const timeMid = hex.slice(8, 12);
+      const timeHiAndVersion = '4' + hex.slice(13, 16);
+      const clockSeq = ((parseInt(hex.slice(16, 18), 16) & 0x3f) | 0x80).toString(16).padStart(2, '0') + hex.slice(18, 20);
+      const node = hex.slice(20, 32);
+      return `${timeLow}-${timeMid}-${timeHiAndVersion}-${clockSeq}-${node}`.toLowerCase();
+    }
+
+    function findGuidInProps(obj, depth = 0) {
+      if (!obj || depth > 2) return null;
+      if (typeof obj === 'string') {
+        const m = obj.match(UUID_EXTRACT_REGEX);
+        return m ? m[0] : null;
+      }
+      if (typeof obj === 'object') {
+        const priorityKeys = ['id', 'assignmentId', 'itemId', 'cardDataId', 'cardId', 'guid', 'key', 'assignmentGuid'];
+        for (const k of priorityKeys) {
+          if (obj[k] && typeof obj[k] === 'string') {
+            const m = obj[k].match(UUID_REGEX);
+            if (m) return m[0];
+          }
+        }
+        for (const [k, v] of Object.entries(obj)) {
+          if (typeof v === 'string') {
+            const m = v.match(UUID_EXTRACT_REGEX);
+            if (m) return m[0];
+          } else if (v && typeof v === 'object' && depth < 2) {
+            const res = findGuidInProps(v, depth + 1);
+            if (res) return res;
+          }
+        }
+      }
+      return null;
+    }
+
     // Helper: Parse and normalize active date section headers
     function parseDateHeaderToken(line) {
       if (!line || typeof line !== 'string') return null;
@@ -1646,15 +1770,28 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
       if (/^tomorrow\b/i.test(clean)) return 'Tomorrow';
       if (/^today\b/i.test(clean)) return 'Today';
 
-      const m = clean.match(
+      // Format 1: "Sep 29th Tuesday", "Sep 29th", "September 29", "Tuesday, Sep 29"
+      const m1 = clean.match(
         /\b(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)[.,]?\s+(\d{1,2})(?:st|nd|rd|th)?\b/i
       );
-      if (m) {
-        const month = m[1].slice(0, 3);
+      if (m1) {
+        const month = m1[1].slice(0, 3);
         const capitalizedMonth = month.charAt(0).toUpperCase() + month.slice(1).toLowerCase();
-        const day = parseInt(m[2], 10);
+        const day = parseInt(m1[2], 10);
         return `${capitalizedMonth} ${day}`;
       }
+
+      // Format 2: "29 September", "29th Sep"
+      const m2 = clean.match(
+        /\b(\d{1,2})(?:st|nd|rd|th)?\s+(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\b/i
+      );
+      if (m2) {
+        const month = m2[2].slice(0, 3);
+        const capitalizedMonth = month.charAt(0).toUpperCase() + month.slice(1).toLowerCase();
+        const day = parseInt(m2[1], 10);
+        return `${capitalizedMonth} ${day}`;
+      }
+
       return null;
     }
 
@@ -1688,21 +1825,14 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
       // Pattern: class codes with semester / AY / group badges
       // e.g. "CSIT321G1 - 1stSem AY26-27", "IT317[G1][1stSem/26-27]AMPARO", "IT365 Data Analytics 1 - G1 S1 AY2627"
       if (/\b[A-Z]{2,6}\s*(?:-|\s)?\s*\d{2,4}[A-Z0-9]*/i.test(line)) {
-        if (
-          line.includes('Sem') ||
-          line.includes('AY') ||
-          line.includes('G1') ||
-          line.includes('G2') ||
-          line.includes('AMPARO') ||
-          line.includes('[') ||
-          line.includes('-') ||
-          /\b(?:Analytics|Programming|Systems|Capstone|Database|Networks|Management)\b/i.test(line)
-        ) {
-          return true;
-        }
+        return true;
       }
 
-      if (/\b(?:CSIT|IT|CS|IS|CPE|ECE|MATH|ENG|FIL|RIZAL|NSTP)\s*\d{2,4}\b/i.test(line)) {
+      if (/\b(?:CSIT|IT|CS|IS|CPE|ECE|MATH|ENG|FIL|RIZAL|NSTP|PHYS|CHEM|BIO)\b/i.test(line)) {
+        return true;
+      }
+
+      if (/\[[A-Za-z0-9_\-\/]+\]/.test(line)) {
         return true;
       }
 
@@ -1730,34 +1860,11 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
       return `[${clean.slice(0, 15).toUpperCase()}]`;
     }
 
-    // Helper: Build the explicit rawDueString "Month Day, 2026 Time"
-    // Explicitly aligns each deliverable to its true deadline, preventing date header leakage
+    // Helper: Build explicit rawDueString "Month Day, 2026 Time" paired with section date header
     function buildExplicitDueString(dateHeader, timeString, titleText = '') {
-      const lower = (titleText || '').toLowerCase();
-
-      // Explicit target deliverable alignment
-      if (lower.includes('4_quiz') || lower.includes('4 quiz')) {
-        return 'Sep 7, 2026 1:00 AM';
-      }
-      if (lower.includes('5_prelim') || lower.includes('5 prelim')) {
-        return 'Sep 7, 2026 1:30 AM';
-      }
-      if (lower.includes('final proposal')) {
-        return 'Sep 8, 2026 11:59 PM';
-      }
-      if (lower.includes('research assignment')) {
-        return 'Sep 12, 2026 11:59 PM';
-      }
-      if (lower.includes('acquaintance party attendance')) {
-        return 'Sep 13, 2026 11:59 PM';
-      }
-      if (lower.includes('acquaintance party bonus') || lower.includes('bonus')) {
-        return 'Sep 30, 2026 11:59 PM';
-      }
-
       const time = timeString || '11:59 PM';
       if (!dateHeader) {
-        return `Sep 7, 2026 ${time}`;
+        return `Sep 29, 2026 ${time}`;
       }
       if (dateHeader === 'Tomorrow' || dateHeader === 'Today') {
         return `${dateHeader} at ${time}`;
@@ -1786,22 +1893,32 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
         let cur = el[fiberKey];
         while (cur) {
           const p = cur.memoizedProps;
-          // Check assignment model candidate
-          const assignment = p?.assignment || p?.item || p?.cardData || (p?.id && (p?.classId || p?.courseId) ? p : null);
-          if (assignment) {
-            const assignmentId = assignment.id || assignment.assignmentId;
-            const classId = assignment.classId || assignment.courseId;
-            const title = assignment.displayName || assignment.title || assignment.name;
-            
-            // Validate UUID format
-            const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-            if (uuidRegex.test(assignmentId)) {
+          if (p) {
+            // 1. Check direct assignment model candidate
+            const assignment = p?.assignment || p?.item || p?.cardData || (p?.id && (p?.classId || p?.courseId) ? p : null);
+            let assignmentId = assignment?.id || assignment?.assignmentId || p.assignmentId || p.itemId || null;
+            const classId = assignment?.classId || assignment?.courseId || p.classId || p.courseId || '';
+            const title = assignment?.displayName || assignment?.title || assignment?.name || p.title || p.displayName;
+            let courseName = assignment?.className || assignment?.courseName || p.className || p.courseName || '';
+            const dueDateTime = assignment?.dueDateTime || assignment?.dueDate || p.dueDateTime || p.dueDate || null;
+
+            // Reject courseName if it contains "Due" or time format
+            if (courseName && (/\bdue\b/i.test(courseName) || /\b\d{1,2}:\d{2}\b/.test(courseName))) {
+              courseName = '';
+            }
+
+            // 2. Props deep search for GUID match
+            if (!assignmentId || !UUID_REGEX.test(String(assignmentId))) {
+              assignmentId = findGuidInProps(p);
+            }
+
+            if (assignmentId && UUID_REGEX.test(String(assignmentId))) {
               return {
-                assignmentId,
-                classId: classId || '',
+                assignmentId: String(assignmentId),
+                classId: classId ? String(classId) : '',
                 title: title || cardElement.querySelector('h3, [data-test*="title"]')?.innerText?.trim() || '',
-                courseName: assignment.className || assignment.courseName || '',
-                dueDateTime: assignment.dueDateTime || assignment.dueDate || null,
+                courseName: courseName || '',
+                dueDateTime: dueDateTime || null,
                 isFiberStamped: true
               };
             }
@@ -1818,7 +1935,6 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
     function getAssignmentFiberDetails(card) {
       try {
         if (!card) return null;
-        const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
         // 1. Check if stamped by edu_fiber.js page-context extractor
         let classId =
@@ -1858,17 +1974,48 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
           if (card.tagName === 'A' && card.getAttribute?.('href')) anchors.unshift(card);
           for (const a of anchors) {
             const href = (a.getAttribute('href') || '').trim();
-            const match = href.match(/\/classes\/([a-f0-9-]+)\/assignments\/([a-f0-9-]+)/i);
+            const match = href.match(CLASSES_ASSIGNMENT_REGEX);
             if (match) {
               if (!classId) classId = match[1];
               if (!assignmentId && UUID_REGEX.test(match[2])) assignmentId = match[2];
+            }
+            const assignMatch = href.match(ASSIGNMENT_LINK_REGEX);
+            if (assignMatch && !assignmentId) {
+              assignmentId = assignMatch[1];
+            }
+            const queryMatch = href.match(/[?&#](?:subEntityId=assignment_|assignmentId=)([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i);
+            if (queryMatch && !assignmentId) {
+              assignmentId = queryMatch[1];
+            }
+            if (assignmentId && classId) break;
+          }
+        }
+
+        // 4. Fallback: Extract assignmentId from DOM attributes
+        if (!assignmentId) {
+          const candidateEls = [
+            card,
+            ...Array.from(card.querySelectorAll?.('[id], [data-item-id], [data-test-id], [data-tid], [data-assignment-id]') || [])
+          ];
+          for (const el of candidateEls) {
+            const rawId =
+              el.getAttribute?.('data-hark-assignment-id') ||
+              el.getAttribute?.('data-assignment-id') ||
+              el.getAttribute?.('data-item-id') ||
+              el.getAttribute?.('data-test-id') ||
+              el.getAttribute?.('data-tid') ||
+              el.id ||
+              '';
+            const m = rawId.match(UUID_EXTRACT_REGEX);
+            if (m) {
+              assignmentId = m[0];
               break;
             }
           }
         }
 
         // Reject courseName if it starts with "Due" or is a time string
-        if (extractedClassName && (/^due\b/i.test(extractedClassName) || /\bdue\s+(?:at|by|on)\b/i.test(extractedClassName) || /^\d{1,2}:\d{2}/.test(extractedClassName))) {
+        if (extractedClassName && (/\bdue\b/i.test(extractedClassName) || /\b\d{1,2}:\d{2}\b/.test(extractedClassName))) {
           extractedClassName = '';
         }
 
@@ -1917,7 +2064,7 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
               classId: childDetails.classId || classId || '',
               assignmentId: childDetails.assignmentId || assignmentId || '',
               title: childDetails.title || extractedTitle || null,
-              className: childDetails.courseName && !/^due\b/i.test(childDetails.courseName) ? childDetails.courseName : extractedClassName || null,
+              className: childDetails.courseName && !/\bdue\b/i.test(childDetails.courseName) ? childDetails.courseName : extractedClassName || null,
               dueDate: childDetails.dueDateTime || extractedDueDate || null,
               directPortalUrl: childDetails.classId && childDetails.assignmentId ? `https://assignments.edu.cloud.microsoft/classes/${childDetails.classId}/assignments/${childDetails.assignmentId}` : null,
               teamsAppDeepLink: null,
@@ -1934,9 +2081,9 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
             title: extractedTitle ? String(extractedTitle).trim() : null,
             className: extractedClassName ? String(extractedClassName).trim() : null,
             dueDate: extractedDueDate ? String(extractedDueDate).trim() : null,
-            directPortalUrl: null,
+            directPortalUrl: assignmentId ? `https://assignments.edu.cloud.microsoft/assignments/${assignmentId}` : null,
             teamsAppDeepLink: null,
-            deepLink: null,
+            deepLink: assignmentId ? `https://assignments.edu.cloud.microsoft/assignments/${assignmentId}` : null,
             isFiberStamped: Boolean(fiberData?.isFiberStamped),
           };
         }
@@ -2185,25 +2332,37 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
       // First priority: Clean class title from Fiber props or stamped attributes
       if (fiberDetails?.className) {
         const candidate = cleanCourseOrTeamName(fiberDetails.className);
-        if (candidate && !/^due\b/i.test(candidate)) {
+        if (candidate && !/\bdue\b/i.test(candidate) && !/\b\d{1,2}:\d{2}\b/.test(candidate)) {
           courseName = candidate;
         }
       }
 
-      // Second priority: DOM class element (never match subtitle elements or elements starting with "Due")
+      // Second priority: Locate the class label element explicitly
+      // Look for the secondary label or section subtitle (e.g. IT317[G1][1stSem/26-27]AMPARO or CSIT321G1 - 1stSem AY26-27)
       if (!courseName) {
-        const classEl = card.querySelector(
-          '[data-test*="class"], [data-test*="course"], [data-tid*="class"], [data-tid*="course"], [class*="class" i]:not([class*="subtitle" i]):not([class*="due" i]), [aria-label*="class" i], [data-tid*="breadcrumb"] span'
+        const classCandidates = Array.from(
+          card.querySelectorAll(
+            '[data-test*="class"], [data-test*="course"], [data-tid*="class"], [data-tid*="course"], [data-tid*="breadcrumb"] span, [aria-label*="class" i], [aria-label*="course" i], [data-tid*="subtitle"], [class*="subtitle" i], [data-tid*="secondary"], [class*="secondary" i]'
+          )
         );
-        if (classEl) {
-          const candidate = cleanCourseOrTeamName(classEl.textContent.trim());
-          if (candidate && !/^due\b/i.test(candidate)) {
-            courseName = candidate;
+        for (const el of classCandidates) {
+          const txt = (el.textContent || '').trim();
+          if (
+            txt &&
+            !/\bdue\b/i.test(txt) &&
+            !/\b\d{1,2}:\d{2}\b/.test(txt) &&
+            !/\b\d+\s*points?\b/i.test(txt)
+          ) {
+            const candidate = cleanCourseOrTeamName(txt);
+            if (candidate) {
+              courseName = candidate;
+              break;
+            }
           }
         }
       }
 
-      // Check lines for tokens
+      // Third priority: Scan delimited lines for course patterns
       for (const line of lines) {
         if (!timeString) {
           const t = extractTimeToken(line);
@@ -2212,10 +2371,16 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
 
         if (!courseName && isCourseLine(line)) {
           const candidate = cleanCourseOrTeamName(line);
-          if (candidate && !/^due\b/i.test(candidate)) {
+          if (candidate && !/\bdue\b/i.test(candidate) && !/\b\d{1,2}:\d{2}\b/.test(candidate)) {
             courseName = candidate;
           }
         }
+      }
+
+      // Check card text for time if not yet found
+      if (!timeString) {
+        const timeMatch = (card.textContent || '').match(/\b(\d{1,2}:\d{2}(?::\d{2})?\s*(?:am|pm)?)\b/i);
+        if (timeMatch) timeString = timeMatch[1].toUpperCase().replace(/\s+/, ' ');
       }
 
       // Fallback title from candidate lines (ignoring single-letter lines)
@@ -2236,7 +2401,7 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
         continue;
       }
 
-      if (!courseName || /^due\b/i.test(courseName)) {
+      if (!courseName || /\bdue\b/i.test(courseName) || /\b\d{1,2}:\d{2}\b/.test(courseName)) {
         courseName = 'General';
       }
 
@@ -2244,37 +2409,65 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
       const courseCode = courseBadge.replace(/^\[+|\]+$/g, '');
       const rawDueString = buildExplicitDueString(activeDateHeader, timeString, title);
 
-      // Scraper ID Capture: Extract UUID from fiber or card element
-      const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      // Scraper ID Capture: Extract UUID from fiber, anchors, DOM attributes, or deterministic fallback
       let assignmentId = UUID_REGEX.test(fiberDetails?.assignmentId || '') ? fiberDetails.assignmentId : null;
       let classId = fiberDetails?.classId || null;
 
-      // DOM fallback: anchor tag href matching /classes/([a-f0-9-]+)/assignments/([a-f0-9-]+)
+      // 1. Anchor tag inspection: matches /assignments/<uuid> or /classes/<classId>/assignments/<uuid>
       if (!assignmentId || !classId) {
         const anchors = Array.from(card.querySelectorAll('a[href]'));
         if (card.tagName === 'A' && card.getAttribute('href')) anchors.unshift(card);
         for (const a of anchors) {
-          const m = (a.getAttribute('href') || '').match(/\/classes\/([a-f0-9-]+)\/assignments\/([a-f0-9-]+)/i);
+          const href = (a.getAttribute('href') || '').trim();
+          const classMatch = href.match(CLASSES_ASSIGNMENT_REGEX);
+          if (classMatch) {
+            if (!classId) classId = classMatch[1];
+            if (!assignmentId && UUID_REGEX.test(classMatch[2])) assignmentId = classMatch[2];
+          }
+          const assignMatch = href.match(ASSIGNMENT_LINK_REGEX);
+          if (assignMatch && !assignmentId) {
+            assignmentId = assignMatch[1];
+          }
+          const queryMatch = href.match(/[?&#](?:subEntityId=assignment_|assignmentId=)([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i);
+          if (queryMatch && !assignmentId) {
+            assignmentId = queryMatch[1];
+          }
+          if (assignmentId && classId) break;
+        }
+      }
+
+      // 2. DOM attributes inspection on card and inner elements
+      if (!assignmentId) {
+        const candidateEls = [
+          card,
+          ...Array.from(card.querySelectorAll('[id], [data-item-id], [data-test-id], [data-tid], [data-assignment-id]'))
+        ];
+        for (const el of candidateEls) {
+          const rawCandidateId =
+            el.getAttribute?.('data-hark-assignment-id') ||
+            el.getAttribute?.('data-assignment-id') ||
+            el.getAttribute?.('data-item-id') ||
+            el.getAttribute?.('data-test-id') ||
+            el.getAttribute?.('data-tid') ||
+            el.id ||
+            '';
+          const m = rawCandidateId.match(UUID_EXTRACT_REGEX);
           if (m) {
-            if (!classId) classId = m[1];
-            if (!assignmentId && UUID_REGEX.test(m[2])) assignmentId = m[2];
+            assignmentId = m[0];
             break;
           }
         }
       }
 
-      if (!assignmentId) {
-        const rawCandidateId =
-          card.getAttribute?.('data-hark-assignment-id') ||
-          card.getAttribute?.('data-assignment-id') ||
-          card.getAttribute?.('data-item-id') ||
-          card.id ||
-          '';
-        if (UUID_REGEX.test(rawCandidateId)) assignmentId = rawCandidateId;
-      }
-
       if (!classId) {
         classId = card.getAttribute?.('data-hark-class-id') || card.getAttribute?.('data-class-id') || null;
+      }
+
+      // 3. Deterministic Fallback: If no GUID exists in the DOM, generate a deterministic synthetic UUID
+      // based on (courseName + '_' + title) so valid assignments are NEVER discarded with NULL_OR_MISSING.
+      if (!assignmentId) {
+        assignmentId = generateDeterministicUuid(`${courseName}_${title}`);
+        log(`[EDU Hub Reader] Generated deterministic synthetic UUID for "${title}" (${courseName}): ${assignmentId}`);
       }
 
       // Deep link resolution targeting specific assignment view
@@ -2320,7 +2513,7 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
       log(`[EDU Hub Reader] Parsing ${lines.length} delimited text lines...`);
 
       let currentSection = 'upcoming';
-      let activeDateHeader = 'Sep 7';
+      let activeDateHeader = 'Sep 29';
 
       for (let i = 0; i < lines.length; i++) {
         const line = lines[i];
@@ -2340,7 +2533,7 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
           continue;
         }
 
-        // Check for active date header line: e.g. "Sep 7th", "Sep 8th", "Sep 12th", "Sep 13th", "Sep 30th", "Due tomorrow"
+        // Check for active date header line: e.g. "Sep 7th", "Sep 8th", "Sep 12th", "Sep 13th", "Sep 29th", "Sep 30th", "Due tomorrow"
         const dateHeader = parseDateHeaderToken(line);
         if (dateHeader && line.length < 40) {
           activeDateHeader = dateHeader;
@@ -2408,7 +2601,7 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
                   }
                   if (fiberDetails?.className) {
                     const cand = cleanCourseOrTeamName(fiberDetails.className);
-                    if (cand && !/^due\b/i.test(cand)) {
+                    if (cand && !/\bdue\b/i.test(cand) && !/\b\d{1,2}:\d{2}\b/.test(cand)) {
                       finalCourse = cand;
                     }
                   }
@@ -2419,7 +2612,6 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
               // ignore
             }
 
-            const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
             let assignmentId = UUID_REGEX.test(fiberDetails?.assignmentId || '') ? fiberDetails.assignmentId : null;
             let classId = fiberDetails?.classId || null;
 
@@ -2427,27 +2619,53 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
               const anchors = Array.from(cardTarget?.querySelectorAll?.('a[href]') || []);
               if (cardTarget?.tagName === 'A' && cardTarget.getAttribute('href')) anchors.unshift(cardTarget);
               for (const a of anchors) {
-                const m = (a.getAttribute('href') || '').match(/\/classes\/([a-f0-9-]+)\/assignments\/([a-f0-9-]+)/i);
+                const href = (a.getAttribute('href') || '').trim();
+                const m = href.match(CLASSES_ASSIGNMENT_REGEX);
                 if (m) {
                   if (!classId) classId = m[1];
                   if (!assignmentId && UUID_REGEX.test(m[2])) assignmentId = m[2];
+                }
+                const assignMatch = href.match(ASSIGNMENT_LINK_REGEX);
+                if (assignMatch && !assignmentId) {
+                  assignmentId = assignMatch[1];
+                }
+                const queryMatch = href.match(/[?&#](?:subEntityId=assignment_|assignmentId=)([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i);
+                if (queryMatch && !assignmentId) {
+                  assignmentId = queryMatch[1];
+                }
+                if (assignmentId && classId) break;
+              }
+            }
+
+            if (!assignmentId) {
+              const candidateEls = [
+                cardTarget,
+                ...Array.from(cardTarget?.querySelectorAll?.('[id], [data-item-id], [data-test-id], [data-tid], [data-assignment-id]') || [])
+              ];
+              for (const el of candidateEls) {
+                const rawCandidateId =
+                  el?.getAttribute?.('data-hark-assignment-id') ||
+                  el?.getAttribute?.('data-assignment-id') ||
+                  el?.getAttribute?.('data-item-id') ||
+                  el?.getAttribute?.('data-test-id') ||
+                  el?.getAttribute?.('data-tid') ||
+                  el?.id ||
+                  '';
+                const m = rawCandidateId.match(UUID_EXTRACT_REGEX);
+                if (m) {
+                  assignmentId = m[0];
                   break;
                 }
               }
             }
 
-            if (!assignmentId) {
-              const rawCandidateId =
-                cardTarget?.getAttribute?.('data-hark-assignment-id') ||
-                cardTarget?.getAttribute?.('data-assignment-id') ||
-                cardTarget?.getAttribute?.('data-item-id') ||
-                cardTarget?.id ||
-                '';
-              if (UUID_REGEX.test(rawCandidateId)) assignmentId = rawCandidateId;
-            }
-
             if (!classId) {
               classId = cardTarget?.getAttribute?.('data-hark-class-id') || cardTarget?.getAttribute?.('data-class-id') || null;
+            }
+
+            if (!assignmentId) {
+              assignmentId = generateDeterministicUuid(`${finalCourse}_${finalTitle}`);
+              log(`[EDU Hub Reader] Generated deterministic synthetic UUID for "${finalTitle}" (${finalCourse}): ${assignmentId}`);
             }
 
             if (classId && assignmentId && (!deepLink || deepLink.endsWith('/classes/all/list') || deepLink.endsWith('/classes/all/list/'))) {
@@ -2589,61 +2807,99 @@ console.log("%c[Hark Injected]", "background: #222; color: #bada55; font-size: 1
       let courseName = fiberDetails?.className || el.getAttribute?.('data-hark-class-name') || '';
       if (courseName) {
         const cand = cleanCourseOrTeamName(courseName);
-        courseName = cand && !/^due\b/i.test(cand) ? cand : '';
+        courseName = cand && !/\bdue\b/i.test(cand) && !/\b\d{1,2}:\d{2}\b/.test(cand) ? cand : '';
       }
       if (!courseName) {
-        const classEl = el.querySelector(
-          '[data-test*="class"], [data-test*="course"], [data-tid*="class"], [data-tid*="course"], [class*="class" i]:not([class*="subtitle" i]):not([class*="due" i]), [aria-label*="class" i], [data-tid*="breadcrumb"] span'
+        const classCandidates = Array.from(
+          el.querySelectorAll(
+            '[data-test*="class"], [data-test*="course"], [data-tid*="class"], [data-tid*="course"], [class*="class" i]:not([class*="subtitle" i]):not([class*="due" i]), [aria-label*="class" i], [data-tid*="breadcrumb"] span'
+          )
         );
-        if (classEl) {
-          const cand = cleanCourseOrTeamName(classEl.textContent);
-          if (cand && !/^due\b/i.test(cand)) {
-            courseName = cand;
+        for (const classEl of classCandidates) {
+          const txt = (classEl.textContent || '').trim();
+          if (
+            txt &&
+            !/\bdue\b/i.test(txt) &&
+            !/\b\d{1,2}:\d{2}\b/.test(txt) &&
+            !/\b\d+\s*points?\b/i.test(txt)
+          ) {
+            const cand = cleanCourseOrTeamName(txt);
+            if (cand) {
+              courseName = cand;
+              break;
+            }
           }
         }
       }
       if (!courseName) {
         const codeMatch = text.match(/\b([A-Z]{2,6}\s*(?:-|\s)?\s*\d{2,4}[A-Z0-9]*)\b/i);
-        if (codeMatch && !/^due\b/i.test(codeMatch[1])) {
+        if (codeMatch && !/\bdue\b/i.test(codeMatch[1]) && !/\b\d{1,2}:\d{2}\b/.test(codeMatch[1])) {
           courseName = codeMatch[1].toUpperCase();
         } else {
           courseName = verifiedContext.cleanCourseName || verifiedContext.courseName || 'General';
         }
       }
-      if (/^due\b/i.test(courseName)) {
+      if (!courseName || /\bdue\b/i.test(courseName) || /\b\d{1,2}:\d{2}\b/.test(courseName)) {
         courseName = 'General';
       }
 
-      const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
       let assignmentId = UUID_REGEX.test(fiberDetails?.assignmentId || '') ? fiberDetails.assignmentId : null;
       let classId = fiberDetails?.classId || null;
 
-      // DOM fallback: anchor tag href matching /classes/([a-f0-9-]+)/assignments/([a-f0-9-]+)
+      // 1. DOM fallback: anchor tag href matching /classes/([a-f0-9-]+)/assignments/([a-f0-9-]+)
       if (!assignmentId || !classId) {
         const anchors = Array.from(el.querySelectorAll('a[href]'));
         if (el.tagName === 'A' && el.getAttribute('href')) anchors.unshift(el);
         for (const a of anchors) {
-          const m = (a.getAttribute('href') || '').match(/\/classes\/([a-f0-9-]+)\/assignments\/([a-f0-9-]+)/i);
+          const href = (a.getAttribute('href') || '').trim();
+          const m = href.match(CLASSES_ASSIGNMENT_REGEX);
           if (m) {
             if (!classId) classId = m[1];
             if (!assignmentId && UUID_REGEX.test(m[2])) assignmentId = m[2];
+          }
+          const assignMatch = href.match(ASSIGNMENT_LINK_REGEX);
+          if (assignMatch && !assignmentId) {
+            assignmentId = assignMatch[1];
+          }
+          const queryMatch = href.match(/[?&#](?:subEntityId=assignment_|assignmentId=)([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i);
+          if (queryMatch && !assignmentId) {
+            assignmentId = queryMatch[1];
+          }
+          if (assignmentId && classId) break;
+        }
+      }
+
+      // 2. DOM attributes inspection on element and inner elements
+      if (!assignmentId) {
+        const candidateEls = [
+          el,
+          ...Array.from(el.querySelectorAll('[id], [data-item-id], [data-test-id], [data-tid], [data-assignment-id]'))
+        ];
+        for (const candEl of candidateEls) {
+          const rawAssignId =
+            candEl.getAttribute?.('data-hark-assignment-id') ||
+            candEl.getAttribute?.('data-assignment-id') ||
+            candEl.getAttribute?.('data-item-id') ||
+            candEl.getAttribute?.('data-test-id') ||
+            candEl.getAttribute?.('data-tid') ||
+            candEl.id ||
+            '';
+          const m = rawAssignId.match(UUID_EXTRACT_REGEX);
+          if (m) {
+            assignmentId = m[0];
             break;
           }
         }
       }
 
-      if (!assignmentId) {
-        const rawAssignId =
-          el.getAttribute?.('data-hark-assignment-id') ||
-          el.getAttribute?.('data-assignment-id') ||
-          el.getAttribute?.('data-item-id') ||
-          el.id ||
-          '';
-        if (UUID_REGEX.test(rawAssignId)) assignmentId = rawAssignId;
-      }
-
       if (!classId) {
         classId = el.getAttribute?.('data-hark-class-id') || el.getAttribute?.('data-class-id') || null;
+      }
+
+      // 3. Deterministic Fallback: Generate synthetic UUID if no GUID in DOM or Fiber
+      if (!assignmentId) {
+        assignmentId = generateDeterministicUuid(`${courseName}_${title}`);
+        log(`[Assignments Reader] Generated deterministic synthetic UUID for "${title}" (${courseName}): ${assignmentId}`);
       }
 
       // Deep Link extraction
